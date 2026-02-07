@@ -50,8 +50,56 @@ impl PrimitiveDataType {
             PrimitiveDataType::Int => Some(4),
             PrimitiveDataType::BigInt => Some(8),
             PrimitiveDataType::Boolean => Some(1),
-            PrimitiveDataType::Decimal { .. } => Some(16),
+            PrimitiveDataType::Decimal(..) => Some(16),
+            PrimitiveDataType::Float => Some(8),
+            PrimitiveDataType::DateTime => Some(8),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decimal_validation() {
+        // Valid case: Precision > Scale
+        let valid = PrimitiveDataType::decimal(10, 2);
+        assert!(valid.is_ok());
+        assert_eq!(valid.unwrap(), PrimitiveDataType::Decimal(10, 2));
+
+        // Valid case: Precision == Scale
+        let equal = PrimitiveDataType::decimal(5, 5);
+        assert!(equal.is_ok());
+
+        // Invalid case: Scale > Precision
+        let invalid = PrimitiveDataType::decimal(2, 10);
+        assert!(invalid.is_err());
+        
+        // verify error type pattern matching if needed
+        match invalid {
+            Err(SchemaError::InvalidScale { precision, scale }) => {
+                assert_eq!(precision, 2);
+                assert_eq!(scale, 10);
+            }
+            _ => panic!("Expected InvalidScale error"),
+        }
+    }
+
+    #[test]
+    fn test_fixed_sizes() {
+        assert_eq!(PrimitiveDataType::Int.get_fixed_size(), Some(4));
+        assert_eq!(PrimitiveDataType::BigInt.get_fixed_size(), Some(8));
+        assert_eq!(PrimitiveDataType::Float.get_fixed_size(), Some(8));
+        assert_eq!(PrimitiveDataType::Boolean.get_fixed_size(), Some(1));
+        assert_eq!(PrimitiveDataType::DateTime.get_fixed_size(), Some(8));
+        
+        // Decimals are fixed size (16 bytes)
+        assert_eq!(PrimitiveDataType::Decimal(10, 2).get_fixed_size(), Some(16));
+
+        // Varchar and Blob are variable size -> None
+        assert_eq!(PrimitiveDataType::Varchar(255).get_fixed_size(), None);
+        assert_eq!(PrimitiveDataType::Blob(1024).get_fixed_size(), None);
     }
 }
