@@ -2,7 +2,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimitiveDataType {
     /// Represents an unknown or unsupported type.
-    Unknown = 0,
+    Unknown,
 
     /// Represents a 32-bit signed integer (maps to i32).
     Int,
@@ -11,13 +11,13 @@ pub enum PrimitiveDataType {
     BigInt,
 
     /// Represents a variable-length string of characters.
-    Varchar,
+    Varchar(u16),
 
     /// Represents a boolean value (true/false).
     Boolean,
 
     /// Represents a fixed-point number.
-    Decimal,
+    Decimal(u8, u8),
 
     /// Represents a date and time value.
     DateTime,
@@ -26,5 +26,5 @@ pub enum PrimitiveDataType {
     Float,
 
     /// Represents a variable-length binary data blob.
-    Blob,
+    Blob(u32),
 }
