@@ -4,6 +4,7 @@ members = [
     "crates/sql",
     "crates/network",
     "crates/server",
-    "crates/client"
+    "crates/client",
+    "crates/common"
 ]
 resolver = "2"
