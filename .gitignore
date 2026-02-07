@@ -1,0 +1,23 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# IDE and Editor settings
+.idea/
+.vscode/
+*.swp
+*.swo
+*.iml
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Cargo
+# Cargo.lock is usually committed for applications (binaries) to ensure reproducible builds.
+# If this were purely a library, you might ignore it, but for a workspace with a server, keep it.

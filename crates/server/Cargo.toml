@@ -1,0 +1,12 @@
+[package]
+name = "rarmdb_server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[dependencies]
+rarmdb_storage = { path = "../storage" }
+rarmdb_sql = { path = "../sql" }
+rarmdb_network = { path = "../network" }
+tokio = { version = "1", features = ["full"] } # Async runtime
