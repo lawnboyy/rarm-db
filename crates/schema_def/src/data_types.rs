@@ -41,7 +41,7 @@ impl PrimitiveDataType {
             // Return the Failure variant
             return Err(SchemaError::InvalidScale { precision, scale });
         }
-        
+
         Ok(PrimitiveDataType::Decimal(precision, scale))
     }
 
@@ -56,6 +56,19 @@ impl PrimitiveDataType {
             _ => None,
         }
     }
+
+    // pub fn from_string(type_string: &str) -> Result<Self, String> {
+    //     // Assuming 'input' is passed into your function as &str
+    //     let normalized = type_string.trim().to_ascii_uppercase(); // Allocates a new uppercase String
+
+    //     // Check for the parenthesis
+    //     let type_name = match normalized.find('(') {
+    //         Some(index) => &normalized[0..index], // Slice up to the parenthesis
+    //         None => &normalized,                  // Or take the whole string if no parens
+    //     };
+
+        
+    // }
 }
 
 #[cfg(test)]
@@ -76,7 +89,7 @@ mod tests {
         // Invalid case: Scale > Precision
         let invalid = PrimitiveDataType::decimal(2, 10);
         assert!(invalid.is_err());
-        
+
         // verify error type pattern matching if needed
         match invalid {
             Err(SchemaError::InvalidScale { precision, scale }) => {
@@ -94,7 +107,7 @@ mod tests {
         assert_eq!(PrimitiveDataType::Float.get_fixed_size(), Some(8));
         assert_eq!(PrimitiveDataType::Boolean.get_fixed_size(), Some(1));
         assert_eq!(PrimitiveDataType::DateTime.get_fixed_size(), Some(8));
-        
+
         // Decimals are fixed size (16 bytes)
         assert_eq!(PrimitiveDataType::Decimal(10, 2).get_fixed_size(), Some(16));
 
