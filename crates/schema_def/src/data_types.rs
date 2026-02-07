@@ -28,3 +28,30 @@ pub enum PrimitiveDataType {
     /// Represents a variable-length binary data blob.
     Blob(u32),
 }
+
+#[derive(Debug)]
+pub enum SchemaError {
+    InvalidScale { precision: u8, scale: u8 },
+}
+
+impl PrimitiveDataType {
+    // A "Smart Constructor" for Decimal
+    pub fn decimal(precision: u8, scale: u8) -> Result<Self, SchemaError> {
+        if scale > precision {
+            // Return the Failure variant
+            return Err(SchemaError::InvalidScale { precision, scale });
+        }
+        
+        Ok(PrimitiveDataType::Decimal(precision, scale))
+    }
+
+    pub fn get_fixed_size(&self) -> Option<usize> {
+        match self {
+            PrimitiveDataType::Int => Some(4),
+            PrimitiveDataType::BigInt => Some(8),
+            PrimitiveDataType::Boolean => Some(1),
+            PrimitiveDataType::Decimal { .. } => Some(16),
+            _ => None,
+        }
+    }
+}
