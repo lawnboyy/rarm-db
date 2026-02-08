@@ -32,7 +32,7 @@ impl Constraint {
     /// Creates a new Unique Key constraint.
     pub fn unique_key(name: String, column_names: Vec<String>) -> Result<Self, SchemaError> {
         if name.trim().is_empty() {
-            return Err(SchemaError::EmptyColumnName);
+            return Err(SchemaError::InvalidColumnName);
         }
 
         // Validate the column name collection; return an error if any invalid names found (empty strings or all whitespace)
@@ -42,25 +42,41 @@ impl Constraint {
     }
 
     /// Creates a new Foreign Key constraint.
-    // pub fn foreign_key(
-    //     name: String,
-    //     referencing_column_names: Vec<String>,
-    //     referenced_table_name: String,
-    //     referenced_column_names: Vec<String>,
-    //     on_update: ReferentialAction,
-    //     on_delete: ReferentialAction,
-    // ) -> Result<Self, SchemaError> {
-    //     // TODO: Implement validation
-    //     // 1. Name not empty
-    //     // 2. Referenced table not empty
-    //     // 3. Column lists not empty
-    //     // 4. Column lists length mismatch
-    //     todo!()
-    // }
+    pub fn foreign_key(
+        name: String,
+        referencing_column_names: Vec<String>,
+        referenced_table_name: String,
+        referenced_column_names: Vec<String>,
+        on_update: ReferentialAction,
+        on_delete: ReferentialAction,
+    ) -> Result<Self, SchemaError> {
+        // TODO: Implement validation
+        // 1. Name not empty
+        if name.trim().is_empty() {
+            return Err(SchemaError::InvalidColumnName);
+        }
+
+        // 2. Referenced table not empty
+
+        // 3. Column lists not empty
+        // 4. Column lists length mismatch
+        if referenced_column_names.len() != referencing_column_names.len() {
+            return Err(SchemaError::ForeignKeyColumnMismatch);
+        }
+
+        Ok(Constraint::ForeignKey {
+            name,
+            on_update,
+            on_delete,
+            referencing_column_names,
+            referenced_table_name,
+            referenced_column_names,
+        })
+    }
 
     fn validate_key(name: &str, column_names: &[String]) -> Result<(), SchemaError> {
         if name.trim().is_empty() {
-            return Err(SchemaError::EmptyColumnName);
+            return Err(SchemaError::InvalidKeyName);
         }
 
         // Validate the column name collection; return an error if any invalid names found (empty strings or all whitespace)
@@ -72,12 +88,12 @@ impl Constraint {
     /// Checks that the list is not empty and does not contain empty/whitespace strings.
     fn validate_columns(column_names: &[String]) -> Result<(), SchemaError> {
         if column_names.is_empty() {
-            return Err(SchemaError::EmptyColumnName);
+            return Err(SchemaError::InvalidColumnName);
         }
 
         for col in column_names.iter() {
             if col.trim().is_empty() {
-                return Err(SchemaError::EmptyColumnName);
+                return Err(SchemaError::InvalidColumnName);
             }
         }
         Ok(())
@@ -106,6 +122,10 @@ mod tests {
         let pk = Constraint::primary_key("".to_string(), vec!["id".to_string()]);
         assert!(pk.is_err());
         // Verify specific error type if defined, e.g. SchemaError::InvalidFormat
+        match pk {
+            Err(SchemaError::InvalidKeyName) => {}
+            _ => panic!("Expected InvalidScale error"),
+        }
     }
 
     #[test]
@@ -120,51 +140,51 @@ mod tests {
         assert!(uq.is_ok());
     }
 
-    // #[test]
-    // fn test_foreign_key_valid() {
-    //     let fk = Constraint::foreign_key(
-    //         "fk_user_role".to_string(),
-    //         vec!["role_id".to_string()],
-    //         "roles".to_string(),
-    //         vec!["id".to_string()],
-    //         ReferentialAction::Cascade,
-    //         ReferentialAction::NoAction,
-    //     );
-    //     assert!(fk.is_ok());
+    #[test]
+    fn test_foreign_key_valid() {
+        let fk = Constraint::foreign_key(
+            "fk_user_role".to_string(),
+            vec!["role_id".to_string()],
+            "roles".to_string(),
+            vec!["id".to_string()],
+            ReferentialAction::Cascade,
+            ReferentialAction::NoAction,
+        );
+        assert!(fk.is_ok());
 
-    //     if let Constraint::ForeignKey {
-    //         name,
-    //         referencing_column_names,
-    //         referenced_table_name,
-    //         referenced_column_names,
-    //         on_update,
-    //         on_delete,
-    //     } = fk.unwrap()
-    //     {
-    //         assert_eq!(name, "fk_user_role");
-    //         assert_eq!(referencing_column_names, vec!["role_id"]);
-    //         assert_eq!(referenced_table_name, "roles");
-    //         assert_eq!(referenced_column_names, vec!["id"]);
-    //         assert_eq!(on_update, ReferentialAction::Cascade);
-    //         assert_eq!(on_delete, ReferentialAction::NoAction);
-    //     } else {
-    //         panic!("Expected ForeignKey variant");
-    //     }
-    // }
+        if let Constraint::ForeignKey {
+            name,
+            referencing_column_names,
+            referenced_table_name,
+            referenced_column_names,
+            on_update,
+            on_delete,
+        } = fk.unwrap()
+        {
+            assert_eq!(name, "fk_user_role");
+            assert_eq!(referencing_column_names, vec!["role_id"]);
+            assert_eq!(referenced_table_name, "roles");
+            assert_eq!(referenced_column_names, vec!["id"]);
+            assert_eq!(on_update, ReferentialAction::Cascade);
+            assert_eq!(on_delete, ReferentialAction::NoAction);
+        } else {
+            panic!("Expected ForeignKey variant");
+        }
+    }
 
-    // #[test]
-    // fn test_foreign_key_invalid_mismatched_columns() {
-    //     // 2 referencing columns, 1 referenced column
-    //     let fk = Constraint::foreign_key(
-    //         "fk_bad".to_string(),
-    //         vec!["a".to_string(), "b".to_string()],
-    //         "other".to_string(),
-    //         vec!["id".to_string()],
-    //         ReferentialAction::NoAction,
-    //         ReferentialAction::NoAction,
-    //     );
-    //     assert!(fk.is_err());
-    // }
+    #[test]
+    fn test_foreign_key_invalid_mismatched_columns() {
+        // 2 referencing columns, 1 referenced column
+        let fk = Constraint::foreign_key(
+            "fk_bad".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+            "other".to_string(),
+            vec!["id".to_string()],
+            ReferentialAction::NoAction,
+            ReferentialAction::NoAction,
+        );
+        assert!(fk.is_err());
+    }
 
     // #[test]
     // fn test_foreign_key_invalid_empty_referenced_table() {
