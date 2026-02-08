@@ -32,7 +32,7 @@ impl Constraint {
     /// Creates a new Unique Key constraint.
     pub fn unique_key(name: String, column_names: Vec<String>) -> Result<Self, SchemaError> {
         Self::validate_key(&name, &column_names)?;
-        // Return the new primary key constraint.
+        // Return the new unique key constraint.
         Ok(Constraint::UniqueKey { name, column_names })
     }
 
