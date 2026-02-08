@@ -50,18 +50,38 @@ impl Constraint {
         on_update: ReferentialAction,
         on_delete: ReferentialAction,
     ) -> Result<Self, SchemaError> {
-        // TODO: Implement validation
         // 1. Name not empty
         if name.trim().is_empty() {
-            return Err(SchemaError::InvalidColumnName);
+            return Err(SchemaError::InvalidForeignKey(
+                "Foreign key name cannot be empty!".into(),
+            ));
         }
 
         // 2. Referenced table not empty
+        if referenced_table_name.trim().is_empty() {
+            return Err(SchemaError::InvalidForeignKey(
+                "Foreign key referenced table name cannot be empty!".into(),
+            ));
+        }
 
         // 3. Column lists not empty
+        if referenced_column_names.is_empty() {
+            return Err(SchemaError::InvalidForeignKey(
+                "Foreign key referenced column name list cannot be empty!".into(),
+            ));
+        }
+
+        if referencing_column_names.is_empty() {
+            return Err(SchemaError::InvalidForeignKey(
+                "Foreign key referencing column name list cannot be empty!".into(),
+            ));
+        }
+
         // 4. Column lists length mismatch
         if referenced_column_names.len() != referencing_column_names.len() {
-            return Err(SchemaError::ForeignKeyColumnMismatch);
+            return Err(SchemaError::InvalidForeignKey(
+                "Foreign key referenced column names count must match referencing column names count!".into(),
+            ));
         }
 
         Ok(Constraint::ForeignKey {
@@ -186,29 +206,29 @@ mod tests {
         assert!(fk.is_err());
     }
 
-    // #[test]
-    // fn test_foreign_key_invalid_empty_referenced_table() {
-    //     let fk = Constraint::foreign_key(
-    //         "fk_bad".to_string(),
-    //         vec!["id".to_string()],
-    //         "".to_string(), // Empty table name
-    //         vec!["id".to_string()],
-    //         ReferentialAction::NoAction,
-    //         ReferentialAction::NoAction,
-    //     );
-    //     assert!(fk.is_err());
-    // }
+    #[test]
+    fn test_foreign_key_invalid_empty_referenced_table() {
+        let fk = Constraint::foreign_key(
+            "fk_bad".to_string(),
+            vec!["id".to_string()],
+            "".to_string(), // Empty table name
+            vec!["id".to_string()],
+            ReferentialAction::NoAction,
+            ReferentialAction::NoAction,
+        );
+        assert!(fk.is_err());
+    }
 
-    // #[test]
-    // fn test_foreign_key_invalid_empty_columns() {
-    //     let fk = Constraint::foreign_key(
-    //         "fk_bad".to_string(),
-    //         vec![], // Empty columns
-    //         "other".to_string(),
-    //         vec![],
-    //         ReferentialAction::NoAction,
-    //         ReferentialAction::NoAction,
-    //     );
-    //     assert!(fk.is_err());
-    // }
+    #[test]
+    fn test_foreign_key_invalid_empty_columns() {
+        let fk = Constraint::foreign_key(
+            "fk_bad".to_string(),
+            vec![], // Empty columns
+            "other".to_string(),
+            vec![],
+            ReferentialAction::NoAction,
+            ReferentialAction::NoAction,
+        );
+        assert!(fk.is_err());
+    }
 }
