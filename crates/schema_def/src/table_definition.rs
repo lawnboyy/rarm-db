@@ -2,15 +2,35 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ColumnDefinition, SchemaError, constraint::Constraint};
 
+/// Represents the definition of a database table.
+///
+/// This struct holds the schema metadata including columns and constraints.
+/// It corresponds to the data stored in `sys_tables`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TableDefinition {
+    /// The unique identifier for the table (optional during creation, assigned by storage engine).
     pub table_id: u32,
+
+    /// The name of the table.
     pub name: String,
+
+    /// The list of column definitions for this table.
     pub columns: Vec<ColumnDefinition>,
+
+    /// The list of constraints (PK, FK, Unique) defined on this table.
     pub constraints: Vec<Constraint>,
 }
 
 impl TableDefinition {
+    /// Creates a new `TableDefinition` with the specified name.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the table. Must not be empty or whitespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SchemaError::InvalidTableName` if the name is empty or whitespace.
     pub fn new(name: String) -> Result<Self, SchemaError> {
         if name.trim().is_empty() {
             return Err(SchemaError::InvalidTableName(String::from(
@@ -26,18 +46,46 @@ impl TableDefinition {
         })
     }
 
+    /// Adds a column definition to the table.
+    ///
+    /// # Arguments
+    ///
+    /// * `column_def` - The `ColumnDefinition` to add.
     pub fn add_column(&mut self, column_def: ColumnDefinition) {
         self.columns.push(column_def);
     }
 
+    /// Adds a constraint definition to the table.
+    ///
+    /// # Arguments
+    ///
+    /// * `constraint` - The `Constraint` to add.
     pub fn add_constraint(&mut self, constraint: Constraint) {
         self.constraints.push(constraint);
     }
 
+    /// Retrieves a column definition by its name (case-sensitive).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the column to find.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(&ColumnDefinition)` if found, otherwise `None`.
     pub fn get_column(&self, name: &str) -> Option<&ColumnDefinition> {
         self.columns.iter().find(|c| c.name == name)
     }
 
+    /// Retrieves a constraint definition by its name (case-sensitive).
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the constraint to find.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(&Constraint)` if found, otherwise `None`.
     pub fn get_constraint(&self, name: &str) -> Option<&Constraint> {
         self.constraints.iter().find(|c| c.name() == name)
     }
