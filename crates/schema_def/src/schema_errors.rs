@@ -4,6 +4,7 @@ pub enum SchemaError {
     EmptyColumnName,
     EmptyDefaultValue,
     EmptyInput,
+    InvalidColumnName,
     InvalidFormat(String),
     InvalidNumber(String),
     InvalidScale { precision: u8, scale: u8 },

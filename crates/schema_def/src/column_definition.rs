@@ -45,4 +45,57 @@ mod tests {
         assert_eq!(col.is_nullable, false);
         assert_eq!(col.default_value, None);
     }
+
+    #[test]
+    fn test_create_valid_column_with_default() {
+        let col = ColumnDefinition::new(
+            String::from("created_at"), 
+            PrimitiveDataType::DateTime, 
+            false, 
+            Some(String::from("NOW()"))
+        );
+        assert!(col.is_ok());
+        let col = col.unwrap();
+        assert_eq!(col.name, "created_at");
+        assert_eq!(col.default_value, Some(String::from("NOW()")));
+    }
+
+    #[test]
+    fn test_create_invalid_empty_name() {
+        let col = ColumnDefinition::new(String::from(""), PrimitiveDataType::Int, false, None);
+        assert!(col.is_err());
+        assert!(matches!(col.unwrap_err(), SchemaError::EmptyColumnName));
+    }
+
+    #[test]
+    fn test_create_invalid_whitespace_name() {
+        let col = ColumnDefinition::new(String::from("   "), PrimitiveDataType::Int, false, None);
+        assert!(col.is_err());
+        assert!(matches!(col.unwrap_err(), SchemaError::EmptyColumnName));
+    }
+
+    #[test]
+    fn test_create_invalid_empty_default() {
+        let col = ColumnDefinition::new(
+            String::from("id"), 
+            PrimitiveDataType::Int, 
+            false, 
+            Some(String::from(""))
+        );
+        assert!(col.is_err());
+        assert!(matches!(col.unwrap_err(), SchemaError::EmptyDefaultValue));
+    }
+
+    #[test]
+    fn test_create_invalid_whitespace_default() {
+        let col = ColumnDefinition::new(
+            String::from("id"), 
+            PrimitiveDataType::Int, 
+            false, 
+            Some(String::from("   "))
+        );
+        assert!(col.is_err());
+        assert!(matches!(col.unwrap_err(), SchemaError::EmptyDefaultValue));
+    }
 }
+
