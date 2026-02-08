@@ -93,6 +93,15 @@ impl Constraint {
         })
     }
 
+    // Name getter
+    pub fn name(&self) -> &str {
+        match self {
+            Constraint::PrimaryKey { name, .. } => name,
+            Constraint::UniqueKey { name, .. } => name,
+            Constraint::ForeignKey { name, .. } => name,
+        }
+    }
+
     fn validate_key(name: &str, column_names: &[String]) -> Result<(), SchemaError> {
         if name.trim().is_empty() {
             return Err(SchemaError::InvalidKeyName);
