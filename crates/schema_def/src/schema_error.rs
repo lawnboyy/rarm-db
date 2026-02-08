@@ -12,6 +12,7 @@ pub enum SchemaError {
     InvalidFormat(String),
     InvalidKeyName,
     InvalidNumber(String),
+    InvalidTableName(String),
     InvalidScale {
         precision: u8,
         scale: u8,

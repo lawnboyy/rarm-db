@@ -8,3 +8,8 @@ rarmdb_storage = { path = "../storage" }
 rarmdb_sql = { path = "../sql" }
 rarmdb_network = { path = "../network" }
 tokio = { version = "1", features = ["full"] } # Async runtime
+
+[dev-dependencies]
+# ... existing dependencies ...
+# This installs git hooks automatically when you run 'cargo test' or 'cargo build'
+cargo-husky = { version = "1", features = ["user-hooks"] }

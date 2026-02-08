@@ -1,0 +1,17 @@
+#!/bin/sh
+
+# Ensure we are in the project root
+# (Husky usually handles this, but good to be safe)
+
+echo "Running Rust tests (cargo-husky)..."
+
+# Check formatting (optional but recommended)
+# cargo fmt -- --check || exit 1
+
+# Run tests
+cargo test || exit 1
+
+# If you want to enforce lints:
+# cargo clippy -- -D warnings || exit 1
+
+echo "All checks passed!"

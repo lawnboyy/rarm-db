@@ -1,5 +1,5 @@
 [package]
-name = "schema_def"
+name = "rarmdb_schema_def"
 version = "0.1.0"
 edition = "2024"
 

@@ -12,6 +12,12 @@ pub struct TableDefinition {
 
 impl TableDefinition {
     pub fn new(name: String) -> Result<Self, SchemaError> {
+        // if name.trim().is_empty() {
+        //     return Err(SchemaError::InvalidTableName(String::from(
+        //         "Table name cannot be empty or whitespace!",
+        //     )));
+        // }
+
         Ok(TableDefinition {
             table_id: 0,
             name,
@@ -35,5 +41,17 @@ mod tests {
         // Verify defaults (empty lists)
         assert!(table_def.columns.is_empty());
         assert!(table_def.constraints.is_empty());
+    }
+
+    #[test]
+    fn test_create_invalid_empty_name() {
+        let table_def = TableDefinition::new(String::from(""));
+        assert!(table_def.is_err());
+    }
+
+    #[test]
+    fn test_create_invalid_whitespace_name() {
+        let table_def = TableDefinition::new(String::from("   "));
+        assert!(table_def.is_err());
     }
 }
