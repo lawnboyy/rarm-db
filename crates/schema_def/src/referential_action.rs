@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 // Defines the actions that can occur when a referenced key (in a primary/unique constraint)
 /// is updated or deleted, affecting rows referencing it via a foreign key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 pub enum ReferentialAction {
   // No action is taken automatically. The operation (UPDATE/DELETE) on the referenced table
   // will fail if there are dependent rows in the referencing table. This is often the default.

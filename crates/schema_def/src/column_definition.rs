@@ -33,7 +33,7 @@ impl ColumnDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data_types::PrimitiveDataType;
+    use crate::primitive_data_type::PrimitiveDataType;
 
     #[test]
     fn test_create_valid_column() {
