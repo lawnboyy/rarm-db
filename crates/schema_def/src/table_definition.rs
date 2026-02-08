@@ -96,6 +96,13 @@ impl TableDefinition {
             .iter()
             .find(|c| matches!(c, Constraint::PrimaryKey { .. }))
     }
+
+    pub fn get_foreign_keys(&self) -> Vec<&Constraint> {
+        self.constraints
+            .iter()
+            .filter(|c| matches!(c, Constraint::ForeignKey { .. }))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +227,53 @@ mod tests {
             assert_eq!(name, "pk_users");
         } else {
             panic!("Expected PrimaryKey");
+        }
+    }
+
+    #[test]
+    fn test_get_foreign_keys() {
+        let mut table = TableDefinition::new(String::from("orders")).unwrap();
+
+        // Add one PK (should be ignored by get_foreign_keys)
+        let pk =
+            Constraint::primary_key(String::from("pk_orders"), vec![String::from("id")]).unwrap();
+        table.add_constraint(pk);
+
+        // Add two FKs
+        let fk1 = Constraint::foreign_key(
+            String::from("fk_user"),
+            vec![String::from("user_id")],
+            String::from("users"),
+            vec![String::from("id")],
+            crate::ReferentialAction::NoAction,
+            crate::ReferentialAction::NoAction,
+        )
+        .unwrap();
+
+        let fk2 = Constraint::foreign_key(
+            String::from("fk_product"),
+            vec![String::from("product_id")],
+            String::from("products"),
+            vec![String::from("id")],
+            crate::ReferentialAction::NoAction,
+            crate::ReferentialAction::NoAction,
+        )
+        .unwrap();
+
+        table.add_constraint(fk1);
+        table.add_constraint(fk2);
+
+        let fks = table.get_foreign_keys();
+        assert_eq!(fks.len(), 2);
+
+        // Verify we got the FKs back (order depends on insertion, which is preserved in Vec)
+        match fks[0] {
+            Constraint::ForeignKey { name, .. } => assert_eq!(name, "fk_user"),
+            _ => panic!("Expected FK"),
+        }
+        match fks[1] {
+            Constraint::ForeignKey { name, .. } => assert_eq!(name, "fk_product"),
+            _ => panic!("Expected FK"),
         }
     }
 }
