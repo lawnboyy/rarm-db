@@ -89,6 +89,13 @@ impl TableDefinition {
     pub fn get_constraint(&self, name: &str) -> Option<&Constraint> {
         self.constraints.iter().find(|c| c.name() == name)
     }
+
+    pub fn get_primary_key(&self) -> Option<&Constraint> {
+        // Use matches! macro to check if the constraint is the PrimaryKey variant
+        self.constraints
+            .iter()
+            .find(|c| matches!(c, Constraint::PrimaryKey { .. }))
+    }
 }
 
 #[cfg(test)]
@@ -151,5 +158,68 @@ mod tests {
         // Helper method existence check
         assert!(table_def.get_constraint("pk_users").is_some());
         assert!(table_def.get_constraint("missing").is_none());
+    }
+
+    #[test]
+    fn test_kitchen_sink_table_definition() {
+        let mut table = TableDefinition::new(String::from("kitchen_sink")).unwrap();
+
+        // Add columns of different types
+        let col_int =
+            ColumnDefinition::new(String::from("col_int"), PrimitiveDataType::Int, false, None)
+                .unwrap();
+        let col_str = ColumnDefinition::new(
+            String::from("col_str"),
+            PrimitiveDataType::Varchar(100),
+            true,
+            None,
+        )
+        .unwrap();
+
+        table.add_column(col_int);
+        table.add_column(col_str);
+
+        // Add constraints
+        let pk = Constraint::primary_key(String::from("pk_sink"), vec![String::from("col_int")])
+            .unwrap();
+        table.add_constraint(pk);
+
+        assert_eq!(table.columns.len(), 2);
+        assert_eq!(table.constraints.len(), 1);
+
+        // Verify retrieval and data integrity
+        let retrieved_col = table.get_column("col_str").unwrap();
+        assert_eq!(retrieved_col.name, "col_str");
+        assert_eq!(retrieved_col.data_type, PrimitiveDataType::Varchar(100));
+        assert_eq!(retrieved_col.is_nullable, true);
+
+        let retrieved_con = table.get_constraint("pk_sink").unwrap();
+        if let Constraint::PrimaryKey { column_names, .. } = retrieved_con {
+            assert_eq!(column_names.len(), 1);
+            assert_eq!(column_names[0], "col_int");
+        } else {
+            panic!("Expected PrimaryKey constraint");
+        }
+    }
+
+    #[test]
+    fn test_get_primary_key() {
+        let mut table = TableDefinition::new(String::from("users")).unwrap();
+
+        // Case 1: No PK
+        assert!(table.get_primary_key().is_none());
+
+        // Case 2: Has PK
+        let pk =
+            Constraint::primary_key(String::from("pk_users"), vec![String::from("id")]).unwrap();
+        table.add_constraint(pk);
+
+        let retrieved = table.get_primary_key();
+        assert!(retrieved.is_some());
+        if let Some(Constraint::PrimaryKey { name, .. }) = retrieved {
+            assert_eq!(name, "pk_users");
+        } else {
+            panic!("Expected PrimaryKey");
+        }
     }
 }
