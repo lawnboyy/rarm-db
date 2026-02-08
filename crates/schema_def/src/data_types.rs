@@ -1,7 +1,10 @@
 use std::str::FromStr;
+use serde::{Serialize, Deserialize};
+
+use crate::SchemaError;
 
 /// Defines the fundamental data types supported by the database system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum PrimitiveDataType {
     /// Represents an unknown or unsupported type.
     Unknown,
@@ -29,16 +32,6 @@ pub enum PrimitiveDataType {
 
     /// Represents a variable-length binary data blob.
     Blob(u32),
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum SchemaError {
-    InvalidScale { precision: u8, scale: u8 },
-    EmptyInput,
-    InvalidFormat(String),
-    InvalidNumber(String),
-    ArgumentMismatch { type_name: String, expected: String, found: usize },
-    UnknownType(String),
 }
 
 impl PrimitiveDataType {

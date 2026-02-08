@@ -1,0 +1,48 @@
+use crate::{PrimitiveDataType, SchemaError};
+use serde::{Serialize, Deserialize};
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ColumnDefinition {
+  pub name: String,
+  pub data_type: PrimitiveDataType,
+  pub is_nullable: bool,
+  pub default_value: Option<String>
+}
+
+impl ColumnDefinition {
+    pub fn new(name: String, data_type: PrimitiveDataType, is_nullable: bool, default_value: Option<String>) -> Result<Self, SchemaError> {
+        if name.trim().is_empty() {
+          return Err(SchemaError::EmptyColumnName);
+        }
+
+        if let Some(ref val) = default_value {
+          if val.trim().is_empty() {
+            return Err(SchemaError::EmptyDefaultValue);
+          }
+        }
+
+        Ok(ColumnDefinition {
+            name,
+            data_type,
+            is_nullable,
+            default_value
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data_types::PrimitiveDataType;
+
+    #[test]
+    fn test_create_valid_column() {
+        let col = ColumnDefinition::new(String::from("id"), PrimitiveDataType::Int,  false, None);
+        assert!(col.is_ok());
+        let col = col.unwrap();
+        assert_eq!(col.name, "id");
+        assert_eq!(col.data_type, PrimitiveDataType::Int);
+        assert_eq!(col.is_nullable, false);
+        assert_eq!(col.default_value, None);
+    }
+}
