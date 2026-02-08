@@ -12,11 +12,11 @@ pub struct TableDefinition {
 
 impl TableDefinition {
     pub fn new(name: String) -> Result<Self, SchemaError> {
-        // if name.trim().is_empty() {
-        //     return Err(SchemaError::InvalidTableName(String::from(
-        //         "Table name cannot be empty or whitespace!",
-        //     )));
-        // }
+        if name.trim().is_empty() {
+            return Err(SchemaError::InvalidTableName(String::from(
+                "Table name cannot be empty or whitespace!",
+            )));
+        }
 
         Ok(TableDefinition {
             table_id: 0,
