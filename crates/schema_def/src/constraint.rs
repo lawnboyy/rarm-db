@@ -31,14 +31,9 @@ impl Constraint {
 
     /// Creates a new Unique Key constraint.
     pub fn unique_key(name: String, column_names: Vec<String>) -> Result<Self, SchemaError> {
-        if name.trim().is_empty() {
-            return Err(SchemaError::InvalidColumnName);
-        }
-
-        // Validate the column name collection; return an error if any invalid names found (empty strings or all whitespace)
-        Self::validate_columns(&column_names)?;
+        Self::validate_key(&name, &column_names)?;
         // Return the new primary key constraint.
-        Ok(Constraint::PrimaryKey { column_names, name })
+        Ok(Constraint::UniqueKey { name, column_names })
     }
 
     /// Creates a new Foreign Key constraint.
@@ -77,7 +72,11 @@ impl Constraint {
             ));
         }
 
-        // 4. Column lists length mismatch
+        // 4. Column names cannot be empty or whitespace-only.
+        Self::validate_columns(&referenced_column_names)?;
+        Self::validate_columns(&referencing_column_names)?;
+
+        // 5. Column lists length mismatch
         if referenced_column_names.len() != referencing_column_names.len() {
             return Err(SchemaError::InvalidForeignKey(
                 "Foreign key referenced column names count must match referencing column names count!".into(),
@@ -158,6 +157,13 @@ mod tests {
     fn test_unique_key_valid() {
         let uq = Constraint::unique_key("uq_email".to_string(), vec!["email".to_string()]);
         assert!(uq.is_ok());
+
+        if let Constraint::UniqueKey { name, column_names } = uq.unwrap() {
+            assert_eq!(name, "uq_email");
+            assert_eq!(column_names, vec!["email"]);
+        } else {
+            panic!("Expected UniqueKey variant");
+        }
     }
 
     #[test]
@@ -226,6 +232,34 @@ mod tests {
             vec![], // Empty columns
             "other".to_string(),
             vec![],
+            ReferentialAction::NoAction,
+            ReferentialAction::NoAction,
+        );
+        assert!(fk.is_err());
+    }
+
+    #[test]
+    fn test_foreign_key_invalid_referencing_columns_content() {
+        // Valid list length, but contains an empty string
+        let fk = Constraint::foreign_key(
+            "fk_bad".to_string(),
+            vec!["col1".to_string(), "".to_string()],
+            "other".to_string(),
+            vec!["colA".to_string(), "colB".to_string()],
+            ReferentialAction::NoAction,
+            ReferentialAction::NoAction,
+        );
+        assert!(fk.is_err());
+    }
+
+    #[test]
+    fn test_foreign_key_invalid_referenced_columns_content() {
+        // Valid list length, but contains a whitespace string
+        let fk = Constraint::foreign_key(
+            "fk_bad".to_string(),
+            vec!["col1".to_string(), "col2".to_string()],
+            "other".to_string(),
+            vec!["colA".to_string(), "   ".to_string()],
             ReferentialAction::NoAction,
             ReferentialAction::NoAction,
         );
