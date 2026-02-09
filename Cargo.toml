@@ -6,6 +6,7 @@ members = [
     "crates/server",
     "crates/client",
     "crates/common",
-    "crates/schema_def",
+    "crates/schema_def", 
+    "crates/data_model",
 ]
 resolver = "2"
