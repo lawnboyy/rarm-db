@@ -103,6 +103,32 @@ impl TableDefinition {
             .filter(|c| matches!(c, Constraint::ForeignKey { .. }))
             .collect()
     }
+
+    pub fn get_unique_keys(&self) -> Vec<&Constraint> {
+        self.constraints
+            .iter()
+            .filter(|c| matches!(c, Constraint::UniqueKey { .. }))
+            .collect()
+    }
+
+    pub fn get_primary_key_columns(&self) -> Option<Vec<&ColumnDefinition>> {
+        if let Some(Constraint::PrimaryKey { column_names, .. }) = self.get_primary_key() {
+            // Map the column names to column definitions...
+            let column_defs: Vec<&ColumnDefinition> = column_names
+                .iter()
+                .map(|col_name| {
+                    self.columns
+                        .iter()
+                        .find(|c| c.name == col_name.as_str())
+                        .expect("Primary key column not found.")
+                })
+                .collect();
+
+            return Some(column_defs);
+        }
+
+        None
+    }
 }
 
 #[cfg(test)]
@@ -275,5 +301,70 @@ mod tests {
             Constraint::ForeignKey { name, .. } => assert_eq!(name, "fk_product"),
             _ => panic!("Expected FK"),
         }
+    }
+
+    #[test]
+    fn test_get_unique_keys() {
+        let mut table = TableDefinition::new(String::from("users")).unwrap();
+
+        // Add one PK (should be ignored)
+        let pk =
+            Constraint::primary_key(String::from("pk_users"), vec![String::from("id")]).unwrap();
+        table.add_constraint(pk);
+
+        // Add Unique Keys
+        let uq1 =
+            Constraint::unique_key(String::from("uq_email"), vec![String::from("email")]).unwrap();
+        let uq2 =
+            Constraint::unique_key(String::from("uq_username"), vec![String::from("username")])
+                .unwrap();
+
+        table.add_constraint(uq1);
+        table.add_constraint(uq2);
+
+        let uqs = table.get_unique_keys();
+        assert_eq!(uqs.len(), 2);
+
+        match uqs[0] {
+            Constraint::UniqueKey { name, .. } => assert_eq!(name, "uq_email"),
+            _ => panic!("Expected UniqueKey"),
+        }
+        match uqs[1] {
+            Constraint::UniqueKey { name, .. } => assert_eq!(name, "uq_username"),
+            _ => panic!("Expected UniqueKey"),
+        }
+    }
+
+    #[test]
+    fn test_get_primary_key_columns() {
+        let mut table = TableDefinition::new(String::from("users")).unwrap();
+
+        // Add Columns
+        let col1 =
+            ColumnDefinition::new(String::from("id"), PrimitiveDataType::Int, false, None).unwrap();
+        let col2 = ColumnDefinition::new(
+            String::from("username"),
+            PrimitiveDataType::Varchar(50),
+            false,
+            None,
+        )
+        .unwrap();
+        table.add_column(col1);
+        table.add_column(col2);
+
+        // Case 1: No PK yet
+        assert!(table.get_primary_key_columns().is_none());
+
+        // Case 2: Add PK on "id"
+        let pk =
+            Constraint::primary_key(String::from("pk_users"), vec![String::from("id")]).unwrap();
+        table.add_constraint(pk);
+
+        let pk_cols = table.get_primary_key_columns();
+        assert!(pk_cols.is_some());
+        let cols = pk_cols.unwrap();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].name, "id");
+        assert_eq!(cols[0].data_type, PrimitiveDataType::Int);
     }
 }
