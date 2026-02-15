@@ -62,7 +62,9 @@ impl DataValue {
         }
     }
 
-    //fn log(integer: &)
+    pub fn is_fixed_size(&self) -> bool {
+        !matches!(self, DataValue::Blob(_) | DataValue::Text(_))
+    }
 }
 
 #[cfg(test)]
@@ -215,5 +217,23 @@ mod tests {
         // Invalid: Scale too high
         let val_scale = DataValue::Decimal(Decimal::from_str("1.123").unwrap());
         assert!(!val_scale.is_compatible(&schema_decimal));
+    }
+
+    #[test]
+    fn test_is_fixed_size() {
+        // Fixed types
+        assert!(DataValue::Int(123).is_fixed_size());
+        assert!(DataValue::BigInt(123).is_fixed_size());
+        assert!(DataValue::Boolean(true).is_fixed_size());
+        assert!(DataValue::Decimal(Decimal::new(123, 2)).is_fixed_size());
+        assert!(DataValue::Float(OrderedFloat(1.0)).is_fixed_size());
+
+        // Null is treated as fixed size (typically 0 bytes or handled via bitmap)
+        // because it does not require a variable-length data pointer.
+        assert!(DataValue::Null.is_fixed_size());
+
+        // Variable types
+        assert!(!DataValue::Text("hello".to_string()).is_fixed_size());
+        assert!(!DataValue::Blob(vec![1, 2]).is_fixed_size());
     }
 }
