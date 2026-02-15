@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 /// to treat NaN == NanN as true and greater than anything other than
 /// NaN.
 #[derive(Debug, Clone, Copy)]
-pub struct OrderedFloat(f64);
+pub struct OrderedFloat(pub f64);
 
 impl PartialEq for OrderedFloat {
     fn eq(&self, other: &Self) -> bool {
