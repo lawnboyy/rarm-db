@@ -1,3 +1,4 @@
+use rarmdb_schema_def::PrimitiveDataType;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -17,11 +18,65 @@ pub enum DataValue {
     Decimal(Decimal),
 }
 
-impl DataValue {}
+impl DataValue {
+    pub fn is_compatible(&self, schema_type: &PrimitiveDataType) -> bool {
+        match (self, *schema_type) {
+            // Null is compatible with any type, but we should check if the type is nullable
+            (DataValue::Null, _) => true,
+            (DataValue::Int(_), PrimitiveDataType::Int) => true,
+            (DataValue::Int(_), PrimitiveDataType::BigInt) => true,
+            (DataValue::BigInt(_), PrimitiveDataType::BigInt) => true,
+            (DataValue::Boolean(_), PrimitiveDataType::Boolean) => true,
+            (DataValue::Float(_), PrimitiveDataType::Float) => true,
+            (DataValue::Text(val), PrimitiveDataType::Varchar(max_len)) => {
+                val.len() <= (max_len as usize)
+            }
+            (DataValue::Blob(val), PrimitiveDataType::Blob(max_len)) => {
+                val.len() <= (max_len as usize)
+            }
+            (DataValue::DateTime(_), PrimitiveDataType::DateTime) => true,
+            (DataValue::Decimal(val), PrimitiveDataType::Decimal(p, s)) => {
+                // Check the integer part...
+                let scale = val.scale();
+
+                // If the scale is larger than the schema scale allowed, then the value is not compatible.
+                if scale > (s as u32) {
+                    return false;
+                }
+
+                // Get the integer part to the left of the decimal place.
+                let integer_part = val.trunc().abs().mantissa();
+
+                // We've determined the scale is compatible, so if the integer part is 0, then it is compatible
+                // with any max precision from the schema type.
+                if integer_part == 0 {
+                    return true;
+                }
+
+                // Use log(base 10) + 1 to determine the number of digits in the integer part.
+                let mut iterations = 0;
+                let mut remainder = integer_part;
+                while remainder >= 10 {
+                    remainder = remainder / 10;
+                    iterations += 1;
+                }
+
+                let integer_digit_count = iterations + 1;
+
+                return scale <= (s as u32) && integer_digit_count <= p - s;
+            }
+            (_, _) => false,
+        }
+    }
+
+    //fn log(integer: &)
+}
 
 #[cfg(test)]
 mod tests {
     use std::{collections::HashSet, str::FromStr};
+
+    use rarmdb_schema_def::PrimitiveDataType;
 
     use super::*;
 
@@ -96,5 +151,69 @@ mod tests {
         assert!(set.contains(&v2));
         assert!(set.contains(&v3));
         assert!(set.contains(&DataValue::Float(OrderedFloat(f64::NAN))));
+    }
+
+    #[test]
+    fn test_type_compatibility_varchar() {
+        // Schema: VARCHAR(5)
+        let schema_type = PrimitiveDataType::Varchar(5);
+
+        // Valid: "Hello" (5 chars)
+        let val_valid = DataValue::Text("Hello".to_string());
+        assert!(
+            val_valid.is_compatible(&schema_type),
+            "'Hello' should fit in VARCHAR(5)"
+        );
+
+        // Invalid: "Hello World" (11 chars)
+        let val_too_long = DataValue::Text("Hello World".to_string());
+        assert!(
+            !val_too_long.is_compatible(&schema_type),
+            "'Hello World' should NOT fit in VARCHAR(5)"
+        );
+    }
+
+    #[test]
+    fn test_type_compatibility_int() {
+        let schema_int = PrimitiveDataType::Int;
+        let schema_bigint = PrimitiveDataType::BigInt;
+
+        let val_int = DataValue::Int(100);
+        let val_bigint = DataValue::BigInt(100);
+
+        // Int fits in Int
+        assert!(val_int.is_compatible(&schema_int));
+
+        // Int fits in BigInt (Upcasting)
+        assert!(val_int.is_compatible(&schema_bigint));
+
+        // BigInt does NOT fit in Int (Strict type checking)
+        assert!(!val_bigint.is_compatible(&schema_int));
+    }
+
+    #[test]
+    fn test_type_compatibility_decimal() {
+        // Schema: DECIMAL(4, 2) -> Max 99.99
+        let schema_decimal = PrimitiveDataType::Decimal(4, 2);
+
+        // Valid: 10.50 (Precision 4, Scale 2)
+        let val_valid = DataValue::Decimal(Decimal::from_str("10.50").unwrap());
+        assert!(val_valid.is_compatible(&schema_decimal));
+
+        // Valid: 1.1 (Effective precision 2, scale 1 -> fits in 4, 2)
+        let val_small = DataValue::Decimal(Decimal::from_str("1.1").unwrap());
+        assert!(val_small.is_compatible(&schema_decimal));
+
+        // Valid: 0.99 (Integer part 0 fits in 4-2=2 digits)
+        let val_zero_int = DataValue::Decimal(Decimal::from_str("0.99").unwrap());
+        assert!(val_zero_int.is_compatible(&schema_decimal));
+
+        // Invalid: 100.50 (Requires Precision 5: 1-0-0-5-0)
+        let val_overflow = DataValue::Decimal(Decimal::from_str("100.50").unwrap());
+        assert!(!val_overflow.is_compatible(&schema_decimal));
+
+        // Invalid: Scale too high
+        let val_scale = DataValue::Decimal(Decimal::from_str("1.123").unwrap());
+        assert!(!val_scale.is_compatible(&schema_decimal));
     }
 }
