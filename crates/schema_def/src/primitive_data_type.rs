@@ -46,12 +46,18 @@ impl PrimitiveDataType {
         Ok(PrimitiveDataType::Decimal(precision, scale))
     }
 
+    pub fn is_fixed_size(&self) -> bool {
+        !matches!(
+            self,
+            PrimitiveDataType::Blob(_) | PrimitiveDataType::Varchar(_) | PrimitiveDataType::Unknown
+        )
+    }
+
     pub fn get_fixed_size(&self) -> Option<usize> {
         match self {
             PrimitiveDataType::Int => Some(4),
             PrimitiveDataType::BigInt => Some(8),
             PrimitiveDataType::Boolean => Some(1),
-            // Corrected syntax: Tuple variants use (..) not { .. }
             PrimitiveDataType::Decimal(..) => Some(16),
             PrimitiveDataType::Float => Some(8),
             PrimitiveDataType::DateTime => Some(8),
@@ -241,6 +247,20 @@ mod tests {
         // Varchar and Blob are variable size -> None
         assert_eq!(PrimitiveDataType::Varchar(255).get_fixed_size(), None);
         assert_eq!(PrimitiveDataType::Blob(1024).get_fixed_size(), None);
+    }
+
+    #[test]
+    fn test_is_fixed_size() {
+        assert!(PrimitiveDataType::Int.is_fixed_size());
+        assert!(PrimitiveDataType::BigInt.is_fixed_size());
+        assert!(PrimitiveDataType::Float.is_fixed_size());
+        assert!(PrimitiveDataType::Boolean.is_fixed_size());
+        assert!(PrimitiveDataType::DateTime.is_fixed_size());
+        assert!(PrimitiveDataType::Decimal(10, 2).is_fixed_size());
+
+        assert!(!PrimitiveDataType::Varchar(255).is_fixed_size());
+        assert!(!PrimitiveDataType::Blob(1024).is_fixed_size());
+        assert!(!PrimitiveDataType::Unknown.is_fixed_size());
     }
 
     #[test]
