@@ -54,16 +54,9 @@ impl DataValue {
                 }
 
                 // Use log(base 10) + 1 to determine the number of digits in the integer part.
-                let mut iterations = 0;
-                let mut remainder = integer_part;
-                while remainder >= 10 {
-                    remainder = remainder / 10;
-                    iterations += 1;
-                }
+                let integer_digit_count = integer_part.checked_ilog10().unwrap_or(0) + 1;
 
-                let integer_digit_count = iterations + 1;
-
-                return scale <= (s as u32) && integer_digit_count <= p - s;
+                return scale <= (s as u32) && integer_digit_count <= ((p - s) as u32);
             }
             (_, _) => false,
         }
