@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
 use crate::SchemaError;
 
@@ -62,6 +62,22 @@ impl PrimitiveDataType {
             PrimitiveDataType::Float => Some(8),
             PrimitiveDataType::DateTime => Some(8),
             _ => None,
+        }
+    }
+}
+
+impl fmt::Display for PrimitiveDataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PrimitiveDataType::Unknown => write!(f, "UNKNOWN"),
+            PrimitiveDataType::Int => write!(f, "INT"),
+            PrimitiveDataType::BigInt => write!(f, "BIGINT"),
+            PrimitiveDataType::Varchar(len) => write!(f, "VARCHAR({})", len),
+            PrimitiveDataType::Boolean => write!(f, "BOOLEAN"),
+            PrimitiveDataType::Decimal(p, s) => write!(f, "DECIMAL({}, {})", p, s),
+            PrimitiveDataType::DateTime => write!(f, "DATETIME"),
+            PrimitiveDataType::Float => write!(f, "FLOAT"),
+            PrimitiveDataType::Blob(len) => write!(f, "BLOB({})", len),
         }
     }
 }
@@ -261,6 +277,24 @@ mod tests {
         assert!(!PrimitiveDataType::Varchar(255).is_fixed_size());
         assert!(!PrimitiveDataType::Blob(1024).is_fixed_size());
         assert!(!PrimitiveDataType::Unknown.is_fixed_size());
+    }
+
+    #[test]
+    fn test_to_string() {
+        assert_eq!(PrimitiveDataType::Int.to_string(), "INT");
+        assert_eq!(PrimitiveDataType::BigInt.to_string(), "BIGINT");
+        assert_eq!(PrimitiveDataType::Boolean.to_string(), "BOOLEAN");
+        assert_eq!(PrimitiveDataType::DateTime.to_string(), "DATETIME");
+        assert_eq!(PrimitiveDataType::Float.to_string(), "FLOAT");
+        assert_eq!(PrimitiveDataType::Unknown.to_string(), "UNKNOWN");
+
+        // Parameterized
+        assert_eq!(PrimitiveDataType::Varchar(100).to_string(), "VARCHAR(100)");
+        assert_eq!(PrimitiveDataType::Blob(2048).to_string(), "BLOB(2048)");
+        assert_eq!(
+            PrimitiveDataType::Decimal(10, 2).to_string(),
+            "DECIMAL(10, 2)"
+        );
     }
 
     #[test]
