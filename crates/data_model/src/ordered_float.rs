@@ -1,4 +1,8 @@
-use std::cmp::Ordering;
+use core::f64;
+use std::hash::Hash;
+use std::{cmp::Ordering, hash::Hasher};
+
+use serde::{Deserialize, Serialize};
 
 /// New Type wrapper for f64 that implements the Eq and Ord traits so
 /// we can use it in indexes. The f64 does not implement these traits
@@ -6,7 +10,7 @@ use std::cmp::Ordering;
 /// to another NaN value. We wrap the f64 and implement the traits
 /// to treat NaN == NanN as true and greater than anything other than
 /// NaN.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone, Copy, Serialize)]
 pub struct OrderedFloat(pub f64);
 
 impl PartialEq for OrderedFloat {
@@ -20,6 +24,32 @@ impl PartialEq for OrderedFloat {
 }
 
 impl Eq for OrderedFloat {}
+
+/// Implement the Hash trait for our OrderedFloat because the f64 type does not implement the
+/// Hash trait because -0.0 and 0.0 are equivalent and NaN == NaN is false. So we have to
+/// handle those cases to get a consistent hash value for an f64.
+impl Hash for OrderedFloat {
+    fn hash<H>(&self, state: &mut H)
+    where
+        H: Hasher,
+    {
+        // Create a copy of the actual value which we can coerce into a value
+        // that can be consistently hashed if it is -0.0 which won't hash the
+        // same as 0.0. We also handle NaN which will not hash the same for
+        // every instance.
+        let mut coerced_value = self.clone().0;
+        if self.0 == -0.0 {
+            // Force the value to be positive 0.0 and hash that...
+            coerced_value = 0.0;
+        } else if self.0.is_nan() {
+            // Force it to be a canonical NaN hash value.
+            coerced_value = f64::NAN;
+        }
+
+        let bits = coerced_value.to_bits();
+        bits.hash(state);
+    }
+}
 
 impl PartialOrd for OrderedFloat {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -56,7 +86,7 @@ impl Ord for OrderedFloat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cmp::Ordering;
+    use std::{cmp::Ordering, collections::HashSet, hash::DefaultHasher};
 
     #[test]
     fn test_equality_normal_numbers() {
@@ -130,5 +160,58 @@ mod tests {
         assert_eq!(list[3].0, 1.0);
         assert_eq!(list[4].0, f64::INFINITY);
         assert!(list[5].0.is_nan());
+    }
+
+    #[test]
+    fn test_hash_zeros() {
+        let zero = OrderedFloat(0.0);
+        let neg_zero = OrderedFloat(-0.0);
+
+        // Verify equality logic first
+        assert_eq!(zero, neg_zero);
+
+        // Verify hash consistency
+        let mut s1 = DefaultHasher::new();
+        zero.hash(&mut s1);
+        let h1 = s1.finish();
+
+        let mut s2 = DefaultHasher::new();
+        neg_zero.hash(&mut s2);
+        let h2 = s2.finish();
+
+        assert_eq!(h1, h2, "0.0 and -0.0 must hash to the same value");
+    }
+
+    #[test]
+    fn test_hash_nan() {
+        let nan1 = OrderedFloat(f64::NAN);
+        let nan2 = OrderedFloat(f64::NAN);
+
+        let mut s1 = DefaultHasher::new();
+        nan1.hash(&mut s1);
+        let h1 = s1.finish();
+
+        let mut s2 = DefaultHasher::new();
+        nan2.hash(&mut s2);
+        let h2 = s2.finish();
+
+        assert_eq!(h1, h2, "All NaNs must hash to the same value");
+    }
+
+    #[test]
+    fn test_hash_map_usage() {
+        let mut set = HashSet::new();
+
+        // Insert values
+        set.insert(OrderedFloat(0.0));
+        set.insert(OrderedFloat(f64::NAN));
+        set.insert(OrderedFloat(1.5));
+
+        // Look up using equivalent but different representations
+        assert!(set.contains(&OrderedFloat(-0.0)));
+        assert!(set.contains(&OrderedFloat(f64::NAN)));
+        assert!(set.contains(&OrderedFloat(1.5)));
+
+        assert!(!set.contains(&OrderedFloat(2.0)));
     }
 }
