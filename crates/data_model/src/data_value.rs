@@ -1,3 +1,5 @@
+use std::fmt;
+
 use rarmdb_schema_def::PrimitiveDataType;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -59,6 +61,22 @@ impl DataValue {
                 return scale <= (s as u32) && integer_digit_count <= ((p - s) as u32);
             }
             _ => false,
+        }
+    }
+}
+
+impl fmt::Display for DataValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DataValue::BigInt(val) => write!(f, "{}", val.to_string()),
+            DataValue::Int(val) => write!(f, "{}", val.to_string()),
+            DataValue::Blob(val) => write!(f, "<BLOB length={}>", val.len()),
+            DataValue::Boolean(val) => write!(f, "{}", val.to_string()),
+            DataValue::DateTime(val) => write!(f, "{}", val.to_string()),
+            DataValue::Decimal(val) => write!(f, "{}", val.to_string()),
+            DataValue::Float(val) => write!(f, "{}", val.0.to_string()),
+            DataValue::Text(val) => write!(f, "{}", String::from(val)),
+            DataValue::Null => write!(f, "NULL"),
         }
     }
 }
