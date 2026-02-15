@@ -68,14 +68,14 @@ impl DataValue {
 impl fmt::Display for DataValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DataValue::BigInt(val) => write!(f, "{}", val.to_string()),
-            DataValue::Int(val) => write!(f, "{}", val.to_string()),
+            DataValue::BigInt(val) => write!(f, "{}", val),
+            DataValue::Int(val) => write!(f, "{}", val),
             DataValue::Blob(val) => write!(f, "<BLOB length={}>", val.len()),
-            DataValue::Boolean(val) => write!(f, "{}", val.to_string()),
-            DataValue::DateTime(val) => write!(f, "{}", val.to_string()),
-            DataValue::Decimal(val) => write!(f, "{}", val.to_string()),
-            DataValue::Float(val) => write!(f, "{}", val.0.to_string()),
-            DataValue::Text(val) => write!(f, "{}", String::from(val)),
+            DataValue::Boolean(val) => write!(f, "{}", val),
+            DataValue::DateTime(val) => write!(f, "{}", val),
+            DataValue::Decimal(val) => write!(f, "{}", val),
+            DataValue::Float(val) => write!(f, "{}", val.0),
+            DataValue::Text(val) => write!(f, "{}", val),
             DataValue::Null => write!(f, "NULL"),
         }
     }
