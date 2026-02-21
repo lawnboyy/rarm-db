@@ -29,9 +29,10 @@ pub trait FileSystem: Send + Sync {
 /// Abstract interface for operations on an open file.
 #[async_trait]
 pub trait FileHandle: Send + Sync {
-    // Methods will be added as needed by tests.
-    async fn write_at(&self, data: &[u8], offset: u64) -> Result<()>;
+    async fn len(&self) -> Result<u64>;
     async fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize>;
+    async fn set_len(&self, len: u64) -> Result<()>;
+    async fn write_at(&self, data: &[u8], offset: u64) -> Result<()>;
 }
 
 /// Concrete implementation of FileSystem using tokio::fs.
@@ -99,19 +100,10 @@ impl TokioFileHandle {
 
 #[async_trait]
 impl FileHandle for TokioFileHandle {
-    async fn write_at(&self, data: &[u8], offset: u64) -> Result<()> {
-        // Acquire the file lock. This yields a "MutexGuard" which acts like &mut File.
-        // This allows us to perform stateful operations (moving the cursor) safely.
-        let mut file_guard = self._file.lock().await;
-
-        // Seek to the file offset
-        file_guard.seek(SeekFrom::Start(offset)).await?;
-
-        // Write the entire buffer at the current position
-        file_guard.write_all(data).await?;
-
-        // file_guard goes out of scope and will release the lock
-        Ok({})
+    async fn len(&self) -> Result<u64> {
+        let file_guard = self._file.lock().await;
+        let metadata = file_guard.metadata().await?;
+        Ok(metadata.len())
     }
 
     async fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize> {
@@ -125,6 +117,27 @@ impl FileHandle for TokioFileHandle {
         let bytes_read = file_guard.read(buffer).await?;
 
         Ok(bytes_read)
+    }
+
+    async fn set_len(&self, len: u64) -> Result<()> {
+        let file_guard = self._file.lock().await;
+        file_guard.set_len(len).await?;
+        Ok({})
+    }
+
+    async fn write_at(&self, data: &[u8], offset: u64) -> Result<()> {
+        // Acquire the file lock. This yields a "MutexGuard" which acts like &mut File.
+        // This allows us to perform stateful operations (moving the cursor) safely.
+        let mut file_guard = self._file.lock().await;
+
+        // Seek to the file offset
+        file_guard.seek(SeekFrom::Start(offset)).await?;
+
+        // Write the entire buffer at the current position
+        file_guard.write_all(data).await?;
+
+        // file_guard goes out of scope and will release the lock
+        Ok({})
     }
 }
 
@@ -344,5 +357,35 @@ mod tests {
         // Assert
         assert!(nested_path.exists(), "Directory should exist");
         assert!(nested_path.is_dir(), "Path should be a directory");
+    }
+
+    #[tokio::test]
+    async fn test_file_len_and_set_len() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test_len.db");
+        let fs = TokioFileSystem::new();
+
+        let handle = fs
+            .create_file(&file_path)
+            .await
+            .expect("Should create file");
+
+        // Act & Assert 1: Initial length should be 0
+        // Note: You will need to add `len` and `set_len` to the FileHandle trait!
+        let initial_len = handle.len().await.expect("Should get length");
+        assert_eq!(initial_len, 0, "New file should have length 0");
+
+        // Act & Assert 2: Set length to 1024 (simulate pre-allocation)
+        handle.set_len(1024).await.expect("Should set length");
+        let new_len = handle.len().await.expect("Should get length after set_len");
+        assert_eq!(new_len, 1024, "File length should be 1024 after set_len");
+
+        // Act & Assert 3: Writing within pre-allocated space doesn't change length
+        handle
+            .write_at(b"Data", 0)
+            .await
+            .expect("Should write data");
+        let len_after_write = handle.len().await.expect("Should get length after write");
+        assert_eq!(len_after_write, 1024, "File length should still be 1024");
     }
 }
