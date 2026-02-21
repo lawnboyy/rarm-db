@@ -12,6 +12,9 @@ use tokio::{
 /// Abstract interface for file system operations.
 #[async_trait]
 pub trait FileSystem: Send + Sync {
+    /// Creates a path and all parent paths that don't already exist.
+    async fn create_dir_all(&self, path: &Path) -> Result<()>;
+
     /// Creates a new file (or overwrites existing) for reading and writing.
     async fn create_file(&self, path: &Path) -> Result<Box<dyn FileHandle>>;
 
@@ -19,7 +22,7 @@ pub trait FileSystem: Send + Sync {
 
     async fn file_exists(&self, path: &Path) -> Result<bool>;
 
-    /// Opens a file at the given path.
+    /// Opens a file at the given path. Returns an error if the file does not exist.
     async fn open_file(&self, path: &Path) -> Result<Box<dyn FileHandle>>;
 }
 
@@ -42,6 +45,10 @@ impl TokioFileSystem {
 
 #[async_trait]
 impl FileSystem for TokioFileSystem {
+    async fn create_dir_all(&self, path: &Path) -> Result<()> {
+        fs::create_dir_all(path).await
+    }
+
     async fn create_file(&self, path: &Path) -> Result<Box<dyn FileHandle>> {
         let file = OpenOptions::new()
             .read(true)
@@ -320,5 +327,22 @@ mod tests {
 
         // Assert: Verify it no longer exists
         assert!(!file_path.exists(), "File should be removed from disk");
+    }
+
+    #[tokio::test]
+    async fn test_create_dir_all_creates_nested_directories() {
+        let dir = tempdir().unwrap();
+        // Create a deeply nested path that doesn't exist yet
+        let nested_path = dir.path().join("some").join("nested").join("path");
+        let fs = TokioFileSystem::new();
+
+        // Act
+        fs.create_dir_all(&nested_path)
+            .await
+            .expect("Should create nested directories");
+
+        // Assert
+        assert!(nested_path.exists(), "Directory should exist");
+        assert!(nested_path.is_dir(), "Path should be a directory");
     }
 }
