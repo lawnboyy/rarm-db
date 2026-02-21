@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use std::io::{Result, SeekFrom};
 use std::path::Path;
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tokio::{
     fs::{File, OpenOptions},
@@ -19,7 +20,7 @@ pub trait FileSystem: Send + Sync {
 pub trait FileHandle: Send + Sync {
     // Methods will be added as needed by tests.
     async fn write_at(&self, data: &[u8], offset: u64) -> Result<()>;
-    // async fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize>;
+    async fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize>;
 }
 
 /// Concrete implementation of FileSystem using tokio::fs.
@@ -74,12 +75,21 @@ impl FileHandle for TokioFileHandle {
         // Write the entire buffer at the current position
         file_guard.write_all(data).await?;
 
-        // TODO: Temp fix to race condition. This is bad for performance. We'll undo it once the read_at method is
-        // implemented and we can use it in our test.
-        file_guard.sync_all().await?; // Force metadata update
-
         // file_guard goes out of scope and will release the lock
         Ok({})
+    }
+
+    async fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize> {
+        // Acquire the file lock. This yields a "MutexGuard" which acts like &mut File.
+        // This allows us to perform stateful operations (moving the cursor) safely.
+        let mut file_guard = self._file.lock().await;
+
+        // Seek to the file offset
+        file_guard.seek(SeekFrom::Start(offset)).await?;
+
+        let bytes_read = file_guard.read(buffer).await?;
+
+        Ok(bytes_read)
     }
 }
 
@@ -119,15 +129,48 @@ mod tests {
             .expect("Should create file");
 
         let data = b"Hello";
-        // This will fail to compile until you add write_at to the FileHandle trait
         handle
             .write_at(data, 0)
             .await
             .expect("Should write to file");
 
-        // Verify with std::fs that data hit the disk (checking size)
-        let metadata = std::fs::metadata(&file_path).expect("File should exist");
-        let length = metadata.len();
-        assert_eq!(length, 5);
+        // Use read_at to verify data was written, eliminating the need for sync_all
+        let mut buffer = [0u8; 5];
+        let bytes_read = handle
+            .read_at(&mut buffer, 0)
+            .await
+            .expect("Should read from file");
+
+        assert_eq!(bytes_read, 5);
+        assert_eq!(&buffer, data);
+    }
+
+    #[tokio::test]
+    async fn test_read_at_specific_offset() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test_read.db");
+        let fs = TokioFileSystem::new();
+
+        let handle = fs
+            .create_file(&file_path)
+            .await
+            .expect("Should create file");
+
+        // Setup: Write a 10-byte payload
+        handle
+            .write_at(b"HelloWorld", 0)
+            .await
+            .expect("Should write to file");
+
+        // Act: Read 5 bytes starting at offset 5
+        let mut buffer = [0u8; 5];
+        let bytes_read = handle
+            .read_at(&mut buffer, 5)
+            .await
+            .expect("Should read from file");
+
+        // Assert: We should get the second half of the payload
+        assert_eq!(bytes_read, 5);
+        assert_eq!(&buffer, b"World");
     }
 }
