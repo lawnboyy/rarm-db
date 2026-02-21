@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use std::io::{Result, SeekFrom};
 use std::path::Path;
+use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tokio::{
@@ -13,6 +14,10 @@ use tokio::{
 pub trait FileSystem: Send + Sync {
     /// Creates a new file (or overwrites existing) for reading and writing.
     async fn create_file(&self, path: &Path) -> Result<Box<dyn FileHandle>>;
+
+    async fn delete_file(&self, path: &Path) -> Result<()>;
+
+    async fn file_exists(&self, path: &Path) -> Result<bool>;
 
     /// Opens a file at the given path.
     async fn open_file(&self, path: &Path) -> Result<Box<dyn FileHandle>>;
@@ -47,6 +52,14 @@ impl FileSystem for TokioFileSystem {
         let handle = TokioFileHandle::new(file);
 
         Ok(Box::new(handle))
+    }
+
+    async fn delete_file(&self, path: &Path) -> Result<()> {
+        fs::remove_file(path).await
+    }
+
+    async fn file_exists(&self, path: &Path) -> Result<bool> {
+        fs::try_exists(path).await
     }
 
     async fn open_file(&self, path: &Path) -> Result<Box<dyn FileHandle>> {
@@ -260,5 +273,52 @@ mod tests {
             Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
             Ok(_) => panic!("Opening a missing file should have failed, but it succeeded!"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_file_exists_returns_correct_status() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test_exists.db");
+        let fs = TokioFileSystem::new();
+
+        // Act & Assert 1: File doesn't exist yet
+        let exists_initially = fs
+            .file_exists(&file_path)
+            .await
+            .expect("Should check existence without error");
+        assert!(!exists_initially, "File should not exist yet");
+
+        // Setup: Create the file
+        fs.create_file(&file_path)
+            .await
+            .expect("Should create file");
+
+        // Act & Assert 2: File now exists
+        let exists_now = fs
+            .file_exists(&file_path)
+            .await
+            .expect("Should check existence without error");
+        assert!(exists_now, "File should exist after creation");
+    }
+
+    #[tokio::test]
+    async fn test_delete_file_removes_file_from_disk() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test_delete.db");
+        let fs = TokioFileSystem::new();
+
+        // Setup: Create a file to delete
+        fs.create_file(&file_path)
+            .await
+            .expect("Should create file");
+        assert!(file_path.exists(), "File should exist before deletion");
+
+        // Act: Delete the file
+        fs.delete_file(&file_path)
+            .await
+            .expect("Should delete file without error");
+
+        // Assert: Verify it no longer exists
+        assert!(!file_path.exists(), "File should be removed from disk");
     }
 }
