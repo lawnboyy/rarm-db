@@ -13,6 +13,9 @@ use tokio::{
 pub trait FileSystem: Send + Sync {
     /// Creates a new file (or overwrites existing) for reading and writing.
     async fn create_file(&self, path: &Path) -> Result<Box<dyn FileHandle>>;
+
+    /// Opens a file at the given path.
+    async fn open_file(&self, path: &Path) -> Result<Box<dyn FileHandle>>;
 }
 
 /// Abstract interface for operations on an open file.
@@ -38,8 +41,20 @@ impl FileSystem for TokioFileSystem {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
+            .open(path)
+            .await?;
+        let handle = TokioFileHandle::new(file);
+
+        Ok(Box::new(handle))
+    }
+
+    async fn open_file(&self, path: &Path) -> Result<Box<dyn FileHandle>> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(false)
+            .truncate(false)
             .open(path)
             .await?;
         let handle = TokioFileHandle::new(file);
@@ -172,5 +187,78 @@ mod tests {
         // Assert: We should get the second half of the payload
         assert_eq!(bytes_read, 5);
         assert_eq!(&buffer, b"World");
+    }
+
+    #[tokio::test]
+    async fn test_open_existing_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test_open.db");
+        let fs = TokioFileSystem::new();
+
+        // Setup: Create a file, write to it, and explicitly drop the handle to close it
+        {
+            let handle = fs
+                .create_file(&file_path)
+                .await
+                .expect("Should create file");
+            handle
+                .write_at(b"PersistentData", 0)
+                .await
+                .expect("Should write to file");
+        } // The handle goes out of scope here, releasing the file lock
+
+        // Act: Open the existing file
+        // Note: You will need to add the `open_file` method to the FileSystem trait!
+        let handle2 = fs
+            .open_file(&file_path)
+            .await
+            .expect("Should open existing file");
+
+        // Assert: Verify we can read the previously written data
+        let mut buffer = [0u8; 14];
+        let bytes_read = handle2
+            .read_at(&mut buffer, 0)
+            .await
+            .expect("Should read from opened file");
+
+        assert_eq!(bytes_read, 14);
+        assert_eq!(&buffer, b"PersistentData");
+    }
+
+    #[tokio::test]
+    async fn test_create_existing_file_fails() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test_create_existing.db");
+        let fs = TokioFileSystem::new();
+
+        // 1. Create the file initially
+        fs.create_file(&file_path)
+            .await
+            .expect("First creation should succeed");
+
+        // 2. Attempt to create the same file again
+        let result = fs.create_file(&file_path).await;
+
+        // 3. Verify it returns an error and specifically an AlreadyExists error
+        match result {
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists),
+            Ok(_) => panic!("Second creation attempt should have failed, but it succeeded!"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_open_missing_file_fails() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test_open_missing.db");
+        let fs = TokioFileSystem::new();
+
+        // Act: Attempt to open a file that was never created
+        let result = fs.open_file(&file_path).await;
+
+        // Assert: Verify it returns an error and specifically a NotFound error
+        match result {
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
+            Ok(_) => panic!("Opening a missing file should have failed, but it succeeded!"),
+        }
     }
 }
