@@ -1,4 +1,4 @@
-pub const PAGE_SIZE: u16 = 8192;
+pub const PAGE_SIZE: usize = 8192;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PageId {
