@@ -208,7 +208,7 @@ mod tests {
         // Create a distinct 4KB payload to write
         let mut write_buffer = [0u8; PAGE_SIZE];
         write_buffer[0] = 42;
-        write_buffer[4095] = 99;
+        write_buffer[PAGE_SIZE - 1] = 99;
 
         // Act 1: Write the page
         disk_manager
