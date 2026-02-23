@@ -34,9 +34,14 @@ impl DiskManager {
             .with_extension(TABLE_FILE_EXTENSION);
 
         // Now create the new table file.
-        self.file_system.create_file(&path).await?;
+        let file_handle = self.file_system.create_file(&path).await?;
 
-        // TODO: Add file handle to the hashmap cache
+        // Add file handle to the hashmap cache
+        // Get a write lock on the file handle cache.
+        let mut cache = self.file_handles.write().unwrap();
+        // Convert our file handle box to an arc so we can insert it into the cache...
+        let arc_handle = file_handle.into();
+        cache.insert(table_id, Arc::clone(&arc_handle));
 
         Ok(())
     }
@@ -73,8 +78,8 @@ impl DiskManager {
             return Ok(Arc::clone(cached_handle));
         }
 
-        // It's still not in the cache and we have an exclusive write lock, so we can open
-        // the file now and add it to the cache.
+        // It's still not in the cache and we have an exclusive write lock, so we can add the
+        // file handle to the cache now.
         cache.insert(table_id, Arc::clone(&arc_handle));
         return Ok(arc_handle);
     }
