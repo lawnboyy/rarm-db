@@ -84,7 +84,7 @@ impl DiskManager {
         return Ok(arc_handle);
     }
 
-    pub async fn read_page(&self, page_id: &PageId, buffer: &mut [u8; PAGE_SIZE]) -> Result<()> {
+    pub async fn read_page(&self, page_id: PageId, buffer: &mut [u8; PAGE_SIZE]) -> Result<()> {
         // First get the file handle for this table from the page ID...
         let file_handle = self.get_file_handle(page_id.table_id).await?;
 
@@ -103,7 +103,7 @@ impl DiskManager {
         self.file_system.file_exists(&path).await
     }
 
-    pub async fn write_page(&self, page_id: &PageId, buffer: &[u8; PAGE_SIZE]) -> Result<()> {
+    pub async fn write_page(&self, page_id: PageId, buffer: &[u8; PAGE_SIZE]) -> Result<()> {
         // First get the file handle for this table from the page ID...
         let file_handle = self.get_file_handle(page_id.table_id).await?;
 
@@ -212,14 +212,14 @@ mod tests {
 
         // Act 1: Write the page
         disk_manager
-            .write_page(&page_id, &write_buffer)
+            .write_page(page_id, &write_buffer)
             .await
             .expect("Should write page without error");
 
         // Act 2: Read the page back
         let mut read_buffer = [0u8; PAGE_SIZE];
         disk_manager
-            .read_page(&page_id, &mut read_buffer)
+            .read_page(page_id, &mut read_buffer)
             .await
             .expect("Should read page without error");
 
