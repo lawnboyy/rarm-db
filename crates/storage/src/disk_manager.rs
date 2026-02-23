@@ -81,7 +81,7 @@ impl DiskManager {
         // It's still not in the cache and we have an exclusive write lock, so we can add the
         // file handle to the cache now.
         cache.insert(table_id, Arc::clone(&arc_handle));
-        return Ok(arc_handle);
+        Ok(arc_handle)
     }
 
     pub async fn read_page(&self, page_id: PageId, buffer: &mut [u8; PAGE_SIZE]) -> Result<()> {
