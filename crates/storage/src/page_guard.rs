@@ -15,6 +15,7 @@ impl<'a> PageReadGuard<'a> {
     }
 }
 
+// Point to the read lock guard when dereferencing a PageReadGuard struct.
 impl Deref for PageReadGuard<'_> {
     type Target = [u8; PAGE_SIZE];
 
@@ -23,9 +24,9 @@ impl Deref for PageReadGuard<'_> {
     }
 }
 
-/// Automatically decrement the pin count when the page read guard goes out of scope.
-/// This avoids the need for callers to manually decrement the pin count when the
-/// page is no longer needed.
+// Automatically decrement the pin count when the page read guard goes out of scope.
+// This avoids the need for callers to manually decrement the pin count when the
+// page is no longer needed.
 impl Drop for PageReadGuard<'_> {
     fn drop(&mut self) {
         self.frame.decrement_pin_count();
