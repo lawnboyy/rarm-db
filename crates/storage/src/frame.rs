@@ -23,7 +23,11 @@ impl Frame {
 
     pub fn decrement_pin_count(&self) {
         // Read the pin count, decrement the value, write back in a single atomic operation.
-        self.pin_count.fetch_sub(1, Ordering::SeqCst);
+        let prev_count = self.pin_count.fetch_sub(1, Ordering::SeqCst);
+        assert!(
+            prev_count > 0,
+            "Pin count underflow! Attempted to unpin a frame that was not pinned."
+        );
     }
 
     pub fn get_page_id(&self) -> Option<PageId> {
@@ -62,6 +66,12 @@ impl Frame {
 
     pub fn write_data(&self) -> RwLockWriteGuard<'_, [u8; PAGE_SIZE]> {
         self.data.write().unwrap()
+    }
+}
+
+impl Default for Frame {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
