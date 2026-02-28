@@ -24,6 +24,31 @@ impl DiskManager {
         }
     }
 
+    /// Allocates a new page for the table file associated with the given
+    /// ID. Writes out a zeroed out page sized buffer to initialize the
+    /// page.
+    pub async fn allocate_page(&self, table_id: u32) -> Result<PageId> {
+        // Look up the file handle for the given table ID...
+        let file_handle = self.get_file_handle(table_id).await?;
+        // Determine the next page index using the file length and page size.
+        let file_length = file_handle.len().await?;
+        let next_index = file_length / PAGE_SIZE as u64;
+
+        let zero_buffer = [0u8; PAGE_SIZE];
+        file_handle
+            .write_at(&zero_buffer, next_index * PAGE_SIZE as u64)
+            .await?;
+
+        let page_index: u32 = next_index
+            .try_into()
+            .expect("Database table exceeded the maximum table size!");
+
+        Ok(PageId {
+            table_id,
+            page_index,
+        })
+    }
+
     pub async fn create_table_file(&self, table_id: u32) -> Result<()> {
         // Make sure the base path exists before we attempt to create a table file...
         self.file_system.create_dir_all(&self.base_path).await?;
@@ -228,6 +253,59 @@ mod tests {
             write_buffer.as_ref(),
             read_buffer.as_ref(),
             "Data read from disk should match data written to disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allocate_page_assigns_sequential_page_ids() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = DiskManager::new(
+            Arc::clone(&fs) as Arc<dyn FileSystem>,
+            dir.path().to_path_buf(),
+        );
+        let table_id = 404;
+
+        // Setup: Create the table
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table");
+
+        // Act 1: Allocate the first page
+        let page0 = disk_manager
+            .allocate_page(table_id)
+            .await
+            .expect("Should allocate first page");
+
+        // Assert 1: Should be page index 0
+        assert_eq!(
+            0, page0.page_index,
+            "First allocated page should be index 0"
+        );
+        assert_eq!(table_id, page0.table_id);
+
+        // Act 2: Allocate the second page
+        let page1 = disk_manager
+            .allocate_page(table_id)
+            .await
+            .expect("Should allocate second page");
+
+        // Assert 2: Should be page index 1
+        assert_eq!(
+            1, page1.page_index,
+            "Second allocated page should be index 1"
+        );
+
+        // Assert 3: Verify the file actually grew on disk (2 pages * 8192 bytes = 16384 bytes)
+        let path = dir.path().join(format!("{}.tbl", table_id));
+        let handle = fs.open_file(&path).await.expect("File should exist");
+        let file_len = handle.len().await.expect("Should get file length");
+
+        assert_eq!(
+            (PAGE_SIZE * 2) as u64,
+            file_len,
+            "File length should equal exactly 2 pages"
         );
     }
 }
