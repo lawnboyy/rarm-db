@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{RwLock, RwLockReadGuard};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 //use crate::page_id;
 use crate::{PageId, page_id::PAGE_SIZE};
@@ -21,6 +21,11 @@ impl Frame {
         }
     }
 
+    pub fn decrement_pin_count(&self) {
+        // Read the pin count, decrement the value, write back in a single atomic operation.
+        self.pin_count.fetch_sub(1, Ordering::SeqCst);
+    }
+
     pub fn get_page_id(&self) -> Option<PageId> {
         // Read the page ID from the lock and unwrap it to get the guard.
         // Then dereference to return the a copy of the page ID (because
@@ -32,6 +37,11 @@ impl Frame {
         self.pin_count.load(Ordering::SeqCst)
     }
 
+    pub fn increment_pin_count(&self) {
+        // Read the pin count, add 1, and write the value out in a single atomic operation.
+        self.pin_count.fetch_add(1, Ordering::SeqCst);
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.is_dirty.load(Ordering::SeqCst)
     }
@@ -40,10 +50,18 @@ impl Frame {
         self.data.read().unwrap()
     }
 
+    pub fn set_dirty(&self, val: bool) {
+        self.is_dirty.store(val, Ordering::SeqCst);
+    }
+
     pub fn set_page_id(&self, page_id: Option<PageId>) {
         // Get a write guard...
         let mut write_guard = self.page_id.write().unwrap();
         *write_guard = page_id;
+    }
+
+    pub fn write_data(&self) -> RwLockWriteGuard<'_, [u8; PAGE_SIZE]> {
+        self.data.write().unwrap()
     }
 }
 
@@ -100,41 +118,41 @@ mod tests {
             "Frame should return the newly assigned page ID"
         );
 
-        // // 2. Test Pin Count atomics
-        // frame.increment_pin_count();
-        // frame.increment_pin_count();
-        // assert_eq!(
-        //     2,
-        //     frame.get_pin_count(),
-        //     "Pin count should be 2 after two increments"
-        // );
+        // 2. Test Pin Count atomics
+        frame.increment_pin_count();
+        frame.increment_pin_count();
+        assert_eq!(
+            2,
+            frame.get_pin_count(),
+            "Pin count should be 2 after two increments"
+        );
 
-        // frame.decrement_pin_count();
-        // assert_eq!(
-        //     1,
-        //     frame.get_pin_count(),
-        //     "Pin count should be 1 after one decrement"
-        // );
+        frame.decrement_pin_count();
+        assert_eq!(
+            1,
+            frame.get_pin_count(),
+            "Pin count should be 1 after one decrement"
+        );
 
-        // // 3. Test Dirty Flag atomics
-        // frame.set_dirty(true);
-        // assert!(frame.is_dirty(), "Frame should be marked as dirty");
+        // 3. Test Dirty Flag atomics
+        frame.set_dirty(true);
+        assert!(frame.is_dirty(), "Frame should be marked as dirty");
 
-        // frame.set_dirty(false);
-        // assert!(!frame.is_dirty(), "Frame should be marked as clean");
+        frame.set_dirty(false);
+        assert!(!frame.is_dirty(), "Frame should be marked as clean");
 
-        // // 4. Test Data Buffer mutability
-        // {
-        //     // Acquire the exclusive write lock
-        //     let mut write_guard = frame.write_data();
-        //     write_guard[0] = 42;
-        //     write_guard[PAGE_SIZE - 1] = 99;
-        // } // The write_guard goes out of scope here, automatically releasing the RwLock!
+        // 4. Test Data Buffer mutability
+        {
+            // Acquire the exclusive write lock
+            let mut write_guard = frame.write_data();
+            write_guard[0] = 42;
+            write_guard[PAGE_SIZE - 1] = 99;
+        } // The write_guard goes out of scope here, automatically releasing the RwLock!
 
-        // // Acquire the shared read lock to verify the writes
-        // let read_guard = frame.read_data();
-        // assert_eq!(42, read_guard[0], "First byte should be mutated");
-        // assert_eq!(99, read_guard[PAGE_SIZE - 1], "Last byte should be mutated");
-        // assert_eq!(0, read_guard[1], "Untouched bytes should remain zero");
+        // Acquire the shared read lock to verify the writes
+        let read_guard = frame.read_data();
+        assert_eq!(42, read_guard[0], "First byte should be mutated");
+        assert_eq!(99, read_guard[PAGE_SIZE - 1], "Last byte should be mutated");
+        assert_eq!(0, read_guard[1], "Untouched bytes should remain zero");
     }
 }
