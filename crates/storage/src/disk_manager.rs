@@ -308,4 +308,39 @@ mod tests {
             "File length should equal exactly 2 pages"
         );
     }
+
+    #[tokio::test]
+    async fn test_allocate_page_zero_fills_new_page() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = DiskManager::new(fs, dir.path().to_path_buf());
+        let table_id = 505;
+
+        // Setup: Create the table
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table");
+
+        // Act: Allocate a page
+        let page_id = disk_manager
+            .allocate_page(table_id)
+            .await
+            .expect("Should allocate page");
+
+        // Assert: Read the page back and verify it's entirely zeros
+        // We initialize with 1s to ensure the read actually overwrites our buffer with 0s
+        let mut read_buffer = [1u8; PAGE_SIZE];
+        disk_manager
+            .read_page(page_id, &mut read_buffer)
+            .await
+            .expect("Should read allocated page");
+
+        let expected_buffer = [0u8; PAGE_SIZE];
+        assert_eq!(
+            expected_buffer.as_ref(),
+            read_buffer.as_ref(),
+            "Newly allocated page should be zero-filled"
+        );
+    }
 }
