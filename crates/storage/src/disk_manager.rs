@@ -71,6 +71,8 @@ impl DiskManager {
         Ok(())
     }
 
+    /// Retrieves the file handle associated with the table ID (file per table).
+    /// Checks the cache first, opening the file handle if it is not found.
     async fn get_file_handle(&self, table_id: u32) -> Result<Arc<dyn FileHandle>> {
         // First check if we have a file handle for the table ID in our cache.
         // Wrapped in an inner scope to release the lock if we have a cache miss.
@@ -109,6 +111,7 @@ impl DiskManager {
         Ok(arc_handle)
     }
 
+    /// Reads a page at the given page index and writes it out to the given buffer.
     pub async fn read_page(&self, page_id: PageId, buffer: &mut [u8; PAGE_SIZE]) -> Result<()> {
         // First get the file handle for this table from the page ID...
         let file_handle = self.get_file_handle(page_id.table_id).await?;
@@ -120,6 +123,7 @@ impl DiskManager {
         Ok(())
     }
 
+    /// Checks if a file associated with the given table ID exists.
     pub async fn table_file_exists(&self, table_id: u32) -> Result<bool> {
         let path = self
             .base_path
@@ -128,6 +132,7 @@ impl DiskManager {
         self.file_system.file_exists(&path).await
     }
 
+    /// Writes the given buffer to a page at the given page ID.
     pub async fn write_page(&self, page_id: PageId, buffer: &[u8; PAGE_SIZE]) -> Result<()> {
         // First get the file handle for this table from the page ID...
         let file_handle = self.get_file_handle(page_id.table_id).await?;
