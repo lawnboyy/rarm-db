@@ -1,6 +1,9 @@
 use std::sync::Mutex;
 
 pub trait Evictor {
+    // Pin a frame to prevent eviction.
+    fn pin(&self, frame_id: usize);
+
     // The number of frames eligible for eviction.
     fn size(&self) -> usize;
 
@@ -51,6 +54,12 @@ impl ClockEvictor {
 }
 
 impl Evictor for ClockEvictor {
+    fn pin(&self, frame_id: usize) {
+        let mut state = self.state.lock().unwrap();
+        state.is_in_evictor[frame_id] = false;
+        state.size -= 1;
+    }
+
     fn size(&self) -> usize {
         let state = self.state.lock().unwrap();
         state.size
@@ -86,7 +95,7 @@ impl Evictor for ClockEvictor {
                     state.is_in_evictor[i] = false;
                     state.size -= 1;
                     // Move the clock hand position past the evicted frame.
-                    state.clock_hand = i + 1;
+                    state.clock_hand = (i + 1) % len;
                     return Some(i);
                 } else {
                     state.second_chances[i] = false;
@@ -196,5 +205,44 @@ mod tests {
         );
 
         assert_eq!(None, evictor.victim(), "Should be empty now");
+    }
+
+    #[test]
+    fn test_clock_evictor_pin_removes_from_evictor() {
+        let evictor = ClockEvictor::new(3);
+
+        // Setup: Unpin all frames
+        evictor.unpin(0);
+        evictor.unpin(1);
+        evictor.unpin(2);
+        assert_eq!(3, evictor.size());
+
+        // Pinning frame 1 should remove it from the evictor entirely
+        evictor.pin(1);
+        assert_eq!(2, evictor.size(), "Size should decrease after pinning");
+
+        // First Sweep:
+        // - Hand at 0 (true -> false), advances to 1
+        // - Hand at 1 (skips, because it was pinned!), advances to 2
+        // - Hand at 2 (true -> false), advances to 0
+        // - Hand at 0 (false -> EVICT). Returns 0. Hand advances to 1.
+        assert_eq!(
+            Some(0),
+            evictor.victim(),
+            "Should sweep 0, skip 1, sweep 2, loop around and evict 0"
+        );
+
+        // Next Sweep:
+        // - Hand starts at 1 (skips again)
+        // - Hand at 2 (false -> EVICT). Returns 2. Hand advances to 0.
+        assert_eq!(Some(2), evictor.victim(), "Should skip 1 and evict 2");
+
+        // Now empty
+        assert_eq!(0, evictor.size());
+        assert_eq!(
+            None,
+            evictor.victim(),
+            "Should be empty after evicting the remaining eligible frames"
+        );
     }
 }
