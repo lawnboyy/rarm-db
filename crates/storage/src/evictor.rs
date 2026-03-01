@@ -18,7 +18,7 @@ pub struct ClockEvictorState {
     // to false and the clock hand will move to the next eligible frame. Once the
     // hand lands on an eligible frame with a reference bit set to false, it will
     // evict that frame.
-    second_chance_bits: Vec<bool>,
+    second_chances: Vec<bool>,
 
     // Look up table that indicates if a frame is eligible for eviction.
     is_in_evictor: Vec<bool>,
@@ -39,7 +39,7 @@ impl ClockEvictor {
         let state = Mutex::new(ClockEvictorState {
             is_in_evictor: vec![false; pool_size],
             // hand_position: 0,
-            second_chance_bits: vec![false; pool_size],
+            second_chances: vec![false; pool_size],
             size: 0,
         });
 
@@ -61,14 +61,15 @@ impl Evictor for ClockEvictor {
             state.size += 1;
         }
 
-        // Flip this to true. If it was false, that means a clock sweep
-        // flipped it to false, but now we are unpinning it again, meaning
-        // there has been another interaction with this frame, earning a
-        // second chance to remain cached.
-        state.second_chance_bits[frame_id] = true;
+        // Always flip this to true when unpinning. If it was false, that
+        // means a clock sweep flipped it to false, but now we are unpinning
+        // it again, meaning there has been another interaction with this frame,
+        // earning it a second chance to remain cached.
+        state.second_chances[frame_id] = true;
     }
 
     fn victim(&self) -> Option<usize> {
+        // TODO: Implement the Clock Replacer algorithm
         None
     }
 }
