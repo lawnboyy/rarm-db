@@ -12,6 +12,8 @@ pub trait Evictor {
 }
 
 pub struct ClockEvictorState {
+    // Index that the clock hand currently points to.
+    clock_hand: usize,
     // For each frame in the evictor we'll track a reference bit as a second chance.
     // This will be set to true when a frame is added to the evictor. When the clock
     // hand sweeps to find a victim, if the reference bit is true, it will be set
@@ -37,6 +39,7 @@ pub struct ClockEvictor {
 impl ClockEvictor {
     pub fn new(pool_size: usize) -> Self {
         let state = Mutex::new(ClockEvictorState {
+            clock_hand: 0,
             is_in_evictor: vec![false; pool_size],
             // hand_position: 0,
             second_chances: vec![false; pool_size],
@@ -69,7 +72,29 @@ impl Evictor for ClockEvictor {
     }
 
     fn victim(&self) -> Option<usize> {
-        // TODO: Implement the Clock Replacer algorithm
+        // Use the clock replacer aglorithm to find a victim frame.
+        // First lock mutex to access the inner state...
+        let mut state = self.state.lock().unwrap();
+        let mut i = state.clock_hand;
+        let len = state.is_in_evictor.len();
+        // Loop through the added frames at least twice and check their reference bit.
+        for _ in 0..(len * 2) {
+            // Only consider frames that have been added to the evictor
+            if state.is_in_evictor[i] {
+                if !state.second_chances[i] {
+                    // Remove the frame from the evictor and return the frame ID.
+                    state.is_in_evictor[i] = false;
+                    state.size -= 1;
+                    return Some(i);
+                } else {
+                    state.second_chances[i] = false;
+                }
+            }
+
+            // Cyclicly iterate through the elligible frames.
+            i = (i + 1) % len;
+        }
+
         None
     }
 }
@@ -110,14 +135,14 @@ mod tests {
             "Size should remain 1 when unpinning an already eligible frame"
         );
 
-        // // First victim sweep:
-        // // 1. Hand looks at frame 0 (ref_bit=true). Sets ref_bit=false, moves to 1.
-        // // 2. Hand skips 1 and 2 (not in evictor).
-        // // 3. Hand looks at frame 0 again (ref_bit=false). Evicts 0!
-        // assert_eq!(Some(0), evictor.victim(), "Should sweep and evict frame 0");
+        // First victim sweep:
+        // 1. Hand looks at frame 0 (ref_bit=true). Sets ref_bit=false, moves to 1.
+        // 2. Hand skips 1 and 2 (not in evictor).
+        // 3. Hand looks at frame 0 again (ref_bit=false). Evicts 0!
+        assert_eq!(Some(0), evictor.victim(), "Should sweep and evict frame 0");
 
-        // // Size should be back to 0
-        // assert_eq!(0, evictor.size(), "Size should be 0 after eviction");
-        // assert_eq!(None, evictor.victim(), "Should have no victim when empty");
+        // Size should be back to 0
+        assert_eq!(0, evictor.size(), "Size should be 0 after eviction");
+        assert_eq!(None, evictor.victim(), "Should have no victim when empty");
     }
 }
