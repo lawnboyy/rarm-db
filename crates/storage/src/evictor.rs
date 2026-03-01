@@ -85,6 +85,8 @@ impl Evictor for ClockEvictor {
                     // Remove the frame from the evictor and return the frame ID.
                     state.is_in_evictor[i] = false;
                     state.size -= 1;
+                    // Move the clock hand position past the evicted frame.
+                    state.clock_hand = i + 1;
                     return Some(i);
                 } else {
                     state.second_chances[i] = false;
@@ -95,6 +97,7 @@ impl Evictor for ClockEvictor {
             i = (i + 1) % len;
         }
 
+        state.clock_hand = i;
         None
     }
 }
@@ -144,5 +147,54 @@ mod tests {
         // Size should be back to 0
         assert_eq!(0, evictor.size(), "Size should be 0 after eviction");
         assert_eq!(None, evictor.victim(), "Should have no victim when empty");
+    }
+
+    #[test]
+    fn test_clock_evictor_second_chance_and_hand_position() {
+        let evictor = ClockEvictor::new(4);
+
+        // Setup: Unpin 0, 1, and 2. Hand starts at 0.
+        // State: [0: true, 1: true, 2: true, 3: empty]
+        evictor.unpin(0);
+        evictor.unpin(1);
+        evictor.unpin(2);
+
+        // First Sweep:
+        // - Hand at 0 (true -> false), advances to 1
+        // - Hand at 1 (true -> false), advances to 2
+        // - Hand at 2 (true -> false), advances to 3
+        // - Hand at 3 (skips)
+        // - Hand at 0 (false -> EVICT). Returns 0. Hand advances to 1.
+        assert_eq!(
+            Some(0),
+            evictor.victim(),
+            "Should sweep all, clear bits, and evict 0"
+        );
+
+        // Current State: Hand is at 1. [1: false, 2: false] are in the evictor.
+
+        // Re-arm: We unpin 2 again. This must flip its second chance back to true!
+        evictor.unpin(2);
+
+        // Second Sweep:
+        // - Hand starts at 1. Its bit is still false -> EVICT immediately! Returns 1. Hand advances to 2.
+        assert_eq!(
+            Some(1),
+            evictor.victim(),
+            "Should evict 1 immediately because its bit was left false from the first sweep"
+        );
+
+        // Third Sweep:
+        // - Hand starts at 2. Its bit is TRUE (because we re-armed it).
+        // - Hand at 2 (true -> false), advances to 3.
+        // - Hand loops through 3, 0, 1 (all empty).
+        // - Hand at 2 (false -> EVICT). Returns 2. Hand advances to 3.
+        assert_eq!(
+            Some(2),
+            evictor.victim(),
+            "Should sweep, clear 2's renewed bit, loop around, and then evict 2"
+        );
+
+        assert_eq!(None, evictor.victim(), "Should be empty now");
     }
 }
