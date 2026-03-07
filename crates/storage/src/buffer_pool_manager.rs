@@ -1,20 +1,16 @@
 use std::{
     collections::HashMap,
-    hash::Hash,
     iter,
     sync::{Arc, Mutex},
 };
 
-use tokio::sync::RwLockWriteGuard;
-
-use crate::{DiskManager, Frame, PageId, page_guard::PageWriteGuard, page_id::PAGE_SIZE};
+use crate::{DiskManager, Frame, PageId, page_guard::PageWriteGuard};
 
 pub struct BufferPoolManager {
     disk_manager: Arc<DiskManager>,
     frames: Vec<Frame>,
     free_frames: Mutex<Vec<usize>>,
     page_table: Mutex<HashMap<PageId, usize>>,
-    size: usize,
 }
 
 impl BufferPoolManager {
@@ -30,7 +26,6 @@ impl BufferPoolManager {
             frames: iter::repeat_with(Frame::new).take(size).collect(),
             free_frames: Mutex::new(initial_frames),
             page_table: Mutex::new(HashMap::new()),
-            size,
         }
     }
 
@@ -56,6 +51,7 @@ impl BufferPoolManager {
         let free_frame = &self.frames[frame_id];
         free_frame.increment_pin_count();
         free_frame.set_page_id(Some(page_id));
+        // self.page_table.lock().unwrap()[page_id] = frame_id;
 
         // Acquire the write lock, contruct and return the page write guard with a reference to the frame.
         let write_lock = free_frame.write_data();
