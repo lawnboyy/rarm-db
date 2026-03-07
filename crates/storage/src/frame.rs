@@ -12,7 +12,7 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub fn new() -> Frame {
+    pub fn new() -> Self {
         Frame {
             data: RwLock::new([0u8; PAGE_SIZE]),
             page_id: RwLock::new(None),
