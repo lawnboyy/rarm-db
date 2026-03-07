@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::io::Result;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicU32;
 use std::{path::PathBuf, sync::Arc};
+
+use dashmap::DashMap;
 
 use crate::file_system::FileHandle;
 use crate::page_id::PAGE_SIZE;
@@ -13,6 +16,10 @@ pub struct DiskManager {
     base_path: PathBuf,
     file_handles: RwLock<HashMap<u32, Arc<dyn FileHandle>>>,
     file_system: Arc<dyn FileSystem>,
+    /// Maintain concurrent Hash Map of the next page index for each table ID.
+    /// This allows for a very performant and thread safe determination of the
+    /// next page index to use when allocating new pages.
+    next_page_ids: DashMap<u32, AtomicU32>,
 }
 
 impl DiskManager {
@@ -21,6 +28,7 @@ impl DiskManager {
             base_path: path,
             file_handles: RwLock::new(HashMap::new()),
             file_system: fs,
+            next_page_ids: DashMap::new(),
         }
     }
 
@@ -30,13 +38,17 @@ impl DiskManager {
     pub async fn allocate_page(&self, table_id: u32) -> Result<PageId> {
         // Look up the file handle for the given table ID...
         let file_handle = self.get_file_handle(table_id).await?;
-        // Determine the next page index using the file length and page size.
-        let file_length = file_handle.len().await?;
-        let next_index = file_length / PAGE_SIZE as u64;
+
+        // Determine the next index for the table...
+        let next_index = self
+            .next_page_ids
+            .get(&table_id)
+            .unwrap()
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         let zero_buffer = [0u8; PAGE_SIZE];
         file_handle
-            .write_at(&zero_buffer, next_index * PAGE_SIZE as u64)
+            .write_at(&zero_buffer, next_index as u64 * PAGE_SIZE as u64)
             .await?;
 
         let page_index: u32 = next_index
@@ -68,6 +80,9 @@ impl DiskManager {
         let arc_handle = file_handle.into();
         cache.insert(table_id, Arc::clone(&arc_handle));
 
+        // Add an entry into the next page ID lookup...
+        self.next_page_ids.insert(table_id, 0.into());
+
         Ok(())
     }
 
@@ -94,6 +109,8 @@ impl DiskManager {
             .join(table_id.to_string())
             .with_extension(TABLE_FILE_EXTENSION);
         let file_handle = self.file_system.open_file(&path).await?;
+        // Grab the file length from the handle before we move it into the Arc pointer.
+        let file_length = file_handle.len().await?;
         let arc_handle = Arc::from(file_handle);
 
         // Now we acquire a write lock to update the cache.
@@ -104,6 +121,14 @@ impl DiskManager {
         if let Some(cached_handle) = cache.get(&table_id) {
             return Ok(Arc::clone(cached_handle));
         }
+
+        // Add an entry into the next page ID lookup...
+        // Because this happens after we get the write guard and check the cache a second time, there shouldn't
+        // be a race condition here setting next page index.
+        let next_index = file_length / PAGE_SIZE as u64;
+        self.next_page_ids
+            .entry(table_id)
+            .or_insert_with(|| AtomicU32::new(next_index as u32));
 
         // It's still not in the cache and we have an exclusive write lock, so we can add the
         // file handle to the cache now.
@@ -347,5 +372,50 @@ mod tests {
             read_buffer.as_ref(),
             "Newly allocated page should be zero-filled"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_disk_manager_concurrent_page_allocation_is_thread_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = std::sync::Arc::new(crate::file_system::TokioFileSystem::new());
+        let disk_manager = std::sync::Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+
+        let table_id = 999;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
+
+        // Act: Spawn 100 concurrent threads all hammering the exact same table
+        let mut handles = vec![];
+        for _ in 0..100 {
+            let dm_clone = std::sync::Arc::clone(&disk_manager);
+            handles.push(tokio::spawn(async move {
+                dm_clone
+                    .allocate_page(table_id)
+                    .await
+                    .expect("Allocation should succeed")
+            }));
+        }
+
+        // Await all threads and collect the allocated page IDs
+        let mut allocated_pages = vec![];
+        for handle in handles {
+            let page_id = handle.await.expect("Task should not panic");
+            allocated_pages.push(page_id);
+        }
+
+        // Assert: We should have exactly 100 pages, and they should have perfectly sequential indices (0 to 99)
+        assert_eq!(100, allocated_pages.len());
+
+        // Sort them by their page index (assuming your PageId struct has a page_index property!)
+        allocated_pages.sort_by_key(|p| p.page_index);
+
+        for (expected_index, page_id) in allocated_pages.iter().enumerate() {
+            assert_eq!(
+                expected_index as u32, page_id.page_index,
+                "Race condition detected! Found duplicate or skipped page indices."
+            );
+        }
     }
 }
