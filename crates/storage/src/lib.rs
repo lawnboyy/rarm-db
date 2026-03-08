@@ -1,3 +1,4 @@
+pub mod bpm_error;
 pub mod buffer_pool_manager;
 pub mod disk_manager;
 pub mod evictor;
@@ -6,6 +7,7 @@ pub mod frame;
 pub mod page_guard;
 pub mod page_id;
 
+pub use bpm_error::BufferPoolError;
 pub use buffer_pool_manager::BufferPoolManager;
 pub use disk_manager::DiskManager;
 pub use evictor::Evictor;
