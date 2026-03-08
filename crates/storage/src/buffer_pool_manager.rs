@@ -61,47 +61,40 @@ impl BufferPoolManager {
         Ok(PageWriteGuard::new(free_frame, write_lock))
     }
 
+    /// Fetches a page and returns it, wrapped in a shared read lock guard that will unpin
+    /// the frame when it goes out of scope and is dropped.
     pub async fn fetch_page_read(
         &self,
         page_id: PageId,
     ) -> Result<PageReadGuard<'_>, BufferPoolError> {
-        // Check the page table to see if the page is cached...
-        // Only hold the lock long enough to fetch the frame ID and pin it...
-        let cached_frame_id = {
-            let page_table_guard = self.page_table.lock().unwrap();
-            // We make a copy of the frame ID because the page table HashMap will return a reference to
-            // the frame ID value in memory which can't be guaranteed to be valid after the lock is released
-            // at the end of this scope. We'll need to reference the frame ID outside the scope below if we
-            // found a cached frame, hence the copy.
-            // Note: The syntax here is confusing, but the Some(&frame_id) is not borrowing a reference to
-            // the frame_id like it would if we were on the right side of the expression. Instead it is a
-            // short hand pattern to deference the pointer and copy the underlying value into our frame_id
-            // variable.
-            if let Some(&frame_id) = page_table_guard.get(&page_id) {
-                // We must pin the frame inside the lock to guarantee that it will not be evicted by another
-                // thread prior to the current read completing.
-                self.frames[frame_id].increment_pin_count();
-                // TODO: Remove this frame from the evictor.
-                Some(frame_id)
-            } else {
-                None
-            }
-        };
-
-        if let Some(frame_id) = cached_frame_id {
-            let frame = &self.frames[frame_id];
+        // Call the private helper to return a pinned frame containing the page data.
+        if let Ok(frame) = self.pin_frame(page_id) {
             let read_lock = frame.read_data();
             Ok(PageReadGuard::new(frame, read_lock))
         } else {
-            // TODO: Handle a cache miss by loading the page from disk.
-            return Err(BufferPoolError::Generic(String::from("Handle cache miss.")));
+            return Err(BufferPoolError::BufferFull);
         }
     }
 
+    /// Fetches a page and returns it, wrapped in an exclusive write lock guard that will unpin
+    /// the frame when it goes out of scope and is dropped.
     pub async fn fetch_page_write(
         &self,
         page_id: PageId,
     ) -> Result<PageWriteGuard<'_>, BufferPoolError> {
+        // Call the private helper to return a pinned frame containing the page data.
+        if let Ok(frame) = self.pin_frame(page_id) {
+            let write_lock = frame.write_data();
+            Ok(PageWriteGuard::new(frame, write_lock))
+        } else {
+            return Err(BufferPoolError::BufferFull);
+        }
+    }
+
+    /// Attempts to find the page in the cache. Upon a cache miss, if a free frame is available, the
+    /// page is read from disk and loaded into the free frame. If no free frames are available, the
+    /// evictor is called to evict a page from the cache to free up a frame.
+    fn pin_frame(&self, page_id: PageId) -> Result<&Frame, BufferPoolError> {
         // Check the page table to see if the page is cached...
         // Only hold the lock long enough to fetch the frame ID and pin it...
         let cached_frame_id = {
@@ -127,8 +120,7 @@ impl BufferPoolManager {
 
         if let Some(frame_id) = cached_frame_id {
             let frame = &self.frames[frame_id];
-            let write_lock = frame.write_data();
-            Ok(PageWriteGuard::new(frame, write_lock))
+            Ok(frame)
         } else {
             // TODO: Handle a cache miss by loading the page from disk.
             return Err(BufferPoolError::Generic(String::from("Handle cache miss.")));
