@@ -1,6 +1,7 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 
+use crate::PageId;
 use crate::frame::Frame;
 use crate::page_id::PAGE_SIZE;
 
@@ -53,6 +54,10 @@ impl<'a> PageWriteGuard<'a> {
 
     pub fn mark_dirty(&self) {
         self.frame.set_dirty(true);
+    }
+
+    pub fn page_id(&self) -> PageId {
+        self.frame.get_page_id().unwrap()
     }
 }
 

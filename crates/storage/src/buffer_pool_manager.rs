@@ -47,16 +47,21 @@ impl BufferPoolManager {
         };
 
         // Pin the frame and set the page ID...
-        // TODO: Add the page ID to the page table.
         let free_frame = &self.frames[frame_id];
         free_frame.increment_pin_count();
         free_frame.set_page_id(Some(page_id));
-        // self.page_table.lock().unwrap()[page_id] = frame_id;
+
+        // Add the page ID to the page table.
+        self.page_table.lock().unwrap().insert(page_id, frame_id);
 
         // Acquire the write lock, contruct and return the page write guard with a reference to the frame.
         let write_lock = free_frame.write_data();
         Ok(PageWriteGuard::new(&free_frame, write_lock))
     }
+
+    // pub async fetch_page_read(&self, page_id: PageId) {
+
+    // }
 }
 
 #[cfg(test)]
@@ -95,4 +100,41 @@ mod tests {
         // At this point, the page guard goes out of scope and drops,
         // which should automatically unpin the frame!
     }
+
+    // #[tokio::test]
+    // async fn test_bpm_fetch_page_cache_hit() {
+    //     let dir = tempdir().unwrap();
+    //     let fs = Arc::new(TokioFileSystem::new());
+    //     let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+
+    //     let table_id = 200;
+    //     disk_manager
+    //         .create_table_file(table_id)
+    //         .await
+    //         .expect("Should create table file");
+
+    //     let bpm = BufferPoolManager::new(2, disk_manager);
+
+    //     // Act 1: Create a brand new page and write to it
+    //     let page_id = {
+    //         let mut page_guard = bpm.create_page(table_id).await.expect("Should create page");
+    //         page_guard[0] = 88;
+    //         page_guard[1] = 99;
+    //         page_guard.mark_dirty();
+
+    //         // Note: We need a way to get the PageId out of the guard!
+    //         page_guard.page_id()
+    //     };
+    //     // The write guard drops here. The frame's pin_count hits 0, and you should add it to the evictor.
+
+    //     // Act 2: Fetch the EXACT same page for reading
+    //     let read_guard = bpm
+    //         .fetch_page_read(page_id)
+    //         .await
+    //         .expect("Should fetch page successfully");
+
+    //     // Assert 1: The data should be exactly what we wrote (proving it came from memory, not disk)
+    //     assert_eq!(88, read_guard[0]);
+    //     assert_eq!(99, read_guard[1]);
+    // }
 }
