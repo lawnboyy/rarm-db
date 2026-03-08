@@ -4,14 +4,24 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use tokio::sync::broadcast;
+
 use crate::{
     BufferPoolError, DiskManager, Frame, PageId, PageReadGuard, page_guard::PageWriteGuard,
 };
 
 pub struct BufferPoolManager {
     disk_manager: Arc<DiskManager>,
+    /// Cached pages in memory.
     frames: Vec<Frame>,
+    /// Free frames available for use.
     free_frames: Mutex<Vec<usize>>,
+    /// Map of broadcast channels that tracks any in-flight page fetches. This
+    /// allows other threads that are accessing a page to subcribe to an in-
+    /// flight request for the page and sleep until the disk read is complete
+    /// and the page is cached.
+    in_flight_fetches: Mutex<HashMap<PageId, broadcast::Sender<usize>>>,
+    /// Map of currently cached pages to the frame ID that holds them.
     page_table: Mutex<HashMap<PageId, usize>>,
 }
 
@@ -27,6 +37,7 @@ impl BufferPoolManager {
             disk_manager,
             frames: iter::repeat_with(Frame::new).take(size).collect(),
             free_frames: Mutex::new(initial_frames),
+            in_flight_fetches: Mutex::new(HashMap::new()),
             page_table: Mutex::new(HashMap::new()),
         }
     }
@@ -98,6 +109,7 @@ impl BufferPoolManager {
         // Check the page table to see if the page is cached...
         // Only hold the lock long enough to fetch the frame ID and pin it...
         let cached_frame_id = {
+            // TODO: Re-evaluate whether we need to hold this lock while we check for in-flight requests.
             let page_table_guard = self.page_table.lock().unwrap();
             // We make a copy of the frame ID because the page table HashMap will return a reference to
             // the frame ID value in memory which can't be guaranteed to be valid after the lock is released
@@ -118,47 +130,117 @@ impl BufferPoolManager {
             }
         };
 
+        // See if the paged is cached...
         if let Some(frame_id) = cached_frame_id {
+            // The page is cached, so we can return it.
             let frame = &self.frames[frame_id];
             Ok(frame)
         } else {
-            // Handle a cache miss by loading the page from disk.
-            // First check if we have any free frames...
-            let free_frame_id = {
-                // Acquire the lock on the free_frames vector.
-                let mut free_frame_guard = self.free_frames.lock().unwrap();
-                if let Some(free_frame_id) = free_frame_guard.pop() {
-                    // Pin the frame inside the lock so we prevent eviction.
-                    self.frames[free_frame_id].increment_pin_count();
-                    Some(free_frame_id)
-                } else {
-                    None
-                }
-            };
+            // The page is not cached...
+            // Check if there is an in-flight request for this page ID...
+            let mut in_flight_guard = self.in_flight_fetches.lock().unwrap();
+            let in_flight_result = in_flight_guard.get(&page_id);
 
-            if let Some(frame_id) = free_frame_id {
-                // We have a free frame, so load we can return it since it gets loaded inside the free frame lock.
-                let frame = &self.frames[frame_id];
-                // Load the page from disk into the frame.
-                // TODO: We need to handle a phantom fetch race condition in which multiple threads could potentially load
-                // the same page into different frames.
-                let mut write_guard = self.frames[frame_id].write_data();
-                self.disk_manager
-                    .read_page(page_id, &mut write_guard)
-                    .await
-                    .map_err(|e| {
-                        BufferPoolError::DiskRead(format!(
-                            "Error reading page {} from disk: {}",
-                            page_id, e
-                        ))
-                    })?;
-                Ok(frame)
+            if let Some(in_flight_channel) = in_flight_result {
+                // There is an in-flight request for the page, so we will subscribe to the channel and
+                // wait for it to complete.
+                let mut receiver = in_flight_channel.subscribe();
+                // Drop our mutex on the in flight map so others can access it.
+                drop(in_flight_guard);
+                // TODO: Should we still have the page table mutext held when we get here?
+                let frame_id = receiver.recv().await.map_err(|e| {
+                    BufferPoolError::InFlightBroadcast(format!(
+                        "Error waiting on in flight fetch for page {}: {}",
+                        page_id, e
+                    ))
+                })?;
+                // The in flight request of the page is complete, so the frame should contain the requested page
+                // data. Now we pin it and return.
+                self.frames[frame_id].increment_pin_count();
+                return Ok(&self.frames[frame_id]);
             } else {
-                // We had no free frames, so now we have to evict a frame to make free up memory to store the requested page.
-                return Err(BufferPoolError::Generic(String::from(
-                    "Handle frame eviction.",
-                )));
+                // There was no in flight request, and we still hold the mutex for the in flight fetches map. So
+                // this thread is the leader and will need to create the broadcast channel for other threads to
+                // subscribe to, then fetch the page from disk and load it into a frame in the cache.
+                let (tx, _rx) = broadcast::channel::<usize>(1);
+                in_flight_guard.insert(page_id, tx.clone());
+                // Now that we have our broadcast channel set up we can drop our mutexes and allow other threads to
+                // check for in flight fetches.
+                drop(in_flight_guard);
+                // TODO: Should we still have the page table mutext held when we get here?
+                // Handle a cache miss by loading the page from disk.
+                // First check if we have any free frames...
+                let free_frame_id = {
+                    // Acquire the lock on the free_frames vector.
+                    let mut free_frame_guard = self.free_frames.lock().unwrap();
+                    if let Some(free_frame_id) = free_frame_guard.pop() {
+                        // Pin the frame inside the lock so we prevent eviction.
+                        self.frames[free_frame_id].increment_pin_count();
+                        Some(free_frame_id)
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(frame_id) = free_frame_id {
+                    // We have a free frame, so load we can return it since it gets loaded inside the free frame lock.
+                    let frame = &self.frames[frame_id];
+                    // Load the page from disk into the frame.
+                    // TODO: We need to handle a phantom fetch race condition in which multiple threads could potentially load
+                    // the same page into different frames.
+                    let mut write_guard = self.frames[frame_id].write_data();
+                    self.disk_manager
+                        .read_page(page_id, &mut write_guard)
+                        .await
+                        .map_err(|e| {
+                            BufferPoolError::DiskRead(format!(
+                                "Error reading page {} from disk: {}",
+                                page_id, e
+                            ))
+                        })?;
+                    // The leader is done loading in the page, so now it needs to broadcast a message to any other threads that
+                    // are waiting on this page to be cached.
+                    // Acquire the locks
+                    let mut page_table_guard = self.page_table.lock().unwrap();
+                    let mut in_flight_fetches_guard = self.in_flight_fetches.lock().unwrap();
+                    // We've already pinned the frame in the free frames mutex above, so we don't need to pin it again...
+                    // We do need to set the page ID
+                    self.frames[frame_id].set_page_id(Some(page_id));
+                    // Update the page table with the newly cached page...
+                    page_table_guard.insert(page_id, frame_id);
+
+                    // Remove the page ID from the in flight fetches map and get the transmitter...
+                    if let Some(tx) = in_flight_fetches_guard.remove(&page_id) {
+                        // Notify other threads that the page fetch is complete.
+                        let _ = tx.send(frame_id);
+                    }
+
+                    Ok(frame)
+                } else {
+                    // TODO: Handle a cache miss with no free frames available.
+                    // We had no free frames, so now we have to evict a frame to make free up memory to store the requested page.
+                    return Err(BufferPoolError::Generic(String::from(
+                        "Handle frame eviction.",
+                    )));
+                }
             }
+        }
+    }
+
+    // --- Test Helpers ---
+    // These methods are only compiled during testing to allow us to assert internal state.
+    #[cfg(test)]
+    pub fn get_free_frame_count(&self) -> usize {
+        self.free_frames.lock().unwrap().len()
+    }
+
+    #[cfg(test)]
+    pub fn get_pin_count(&self, page_id: PageId) -> Option<usize> {
+        let page_table = self.page_table.lock().unwrap();
+        if let Some(&frame_id) = page_table.get(&page_id) {
+            Some(self.frames[frame_id].get_pin_count())
+        } else {
+            None
         }
     }
 }
@@ -327,5 +409,92 @@ mod tests {
         // Assert: The data should perfectly match what we wrote to disk
         assert_eq!(77, read_guard[0]);
         assert_eq!(88, read_guard[1]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_bpm_concurrent_cache_miss_prevents_phantom_fetch() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+
+        let table_id = 500;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
+
+        // Setup: Pre-allocate and write the target page to disk
+        let page_id = disk_manager
+            .allocate_page(table_id)
+            .await
+            .expect("Should allocate page");
+        let mut disk_buffer = [0u8; crate::page_id::PAGE_SIZE];
+        disk_buffer[0] = 99;
+        disk_manager
+            .write_page(page_id, &disk_buffer)
+            .await
+            .expect("Should write page");
+
+        let bpm = Arc::new(BufferPoolManager::new(10, disk_manager));
+
+        // FIX: We now use TWO barriers!
+        let barrier_ready = Arc::new(std::sync::Barrier::new(11));
+        let barrier_done = Arc::new(std::sync::Barrier::new(11));
+
+        let mut handles = vec![];
+
+        for _ in 0..10 {
+            let bpm_clone = Arc::clone(&bpm);
+            let barrier_ready_clone = Arc::clone(&barrier_ready);
+            let barrier_done_clone = Arc::clone(&barrier_done);
+
+            handles.push(std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+
+                rt.block_on(async move {
+                    let read_guard = bpm_clone.fetch_page_read(page_id).await.unwrap();
+                    assert_eq!(99, read_guard[0]);
+
+                    // BARRIER 1: Tell the main thread we have our locks!
+                    barrier_ready_clone.wait();
+
+                    // BARRIER 2: Wait for the main thread to finish asserting before we drop!
+                    barrier_done_clone.wait();
+                }); // read_guard FINALLY drops here!
+            }));
+        }
+
+        // BARRIER 1: Wait for all 10 workers to get their guards.
+        let b_ready_main = Arc::clone(&barrier_ready);
+        tokio::task::spawn_blocking(move || b_ready_main.wait())
+            .await
+            .unwrap();
+
+        // -----------------------------------------------------
+        // THE WORKERS ARE FROZEN. WE ARE SAFE TO ASSERT!
+        // -----------------------------------------------------
+        assert_eq!(
+            9,
+            bpm.get_free_frame_count(),
+            "Exactly 1 free frame should be consumed."
+        );
+        assert_eq!(
+            Some(10),
+            bpm.get_pin_count(page_id),
+            "Pin count must be exactly 10."
+        );
+
+        // BARRIER 2: Release the workers so they can drop their guards and clean up.
+        let b_done_main = Arc::clone(&barrier_done);
+        tokio::task::spawn_blocking(move || b_done_main.wait())
+            .await
+            .unwrap();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
     }
 }

@@ -3,4 +3,5 @@ pub enum BufferPoolError {
     BufferFull,
     DiskRead(String),
     Generic(String),
+    InFlightBroadcast(String),
 }
