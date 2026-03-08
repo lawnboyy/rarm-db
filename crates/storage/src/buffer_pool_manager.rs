@@ -68,7 +68,7 @@ impl BufferPoolManager {
         page_id: PageId,
     ) -> Result<PageReadGuard<'_>, BufferPoolError> {
         // Call the private helper to return a pinned frame containing the page data.
-        if let Ok(frame) = self.pin_frame(page_id) {
+        if let Ok(frame) = self.pin_frame(page_id).await {
             let read_lock = frame.read_data();
             Ok(PageReadGuard::new(frame, read_lock))
         } else {
@@ -83,7 +83,7 @@ impl BufferPoolManager {
         page_id: PageId,
     ) -> Result<PageWriteGuard<'_>, BufferPoolError> {
         // Call the private helper to return a pinned frame containing the page data.
-        if let Ok(frame) = self.pin_frame(page_id) {
+        if let Ok(frame) = self.pin_frame(page_id).await {
             let write_lock = frame.write_data();
             Ok(PageWriteGuard::new(frame, write_lock))
         } else {
@@ -94,7 +94,7 @@ impl BufferPoolManager {
     /// Attempts to find the page in the cache. Upon a cache miss, if a free frame is available, the
     /// page is read from disk and loaded into the free frame. If no free frames are available, the
     /// evictor is called to evict a page from the cache to free up a frame.
-    fn pin_frame(&self, page_id: PageId) -> Result<&Frame, BufferPoolError> {
+    async fn pin_frame(&self, page_id: PageId) -> Result<&Frame, BufferPoolError> {
         // Check the page table to see if the page is cached...
         // Only hold the lock long enough to fetch the frame ID and pin it...
         let cached_frame_id = {
@@ -122,8 +122,43 @@ impl BufferPoolManager {
             let frame = &self.frames[frame_id];
             Ok(frame)
         } else {
-            // TODO: Handle a cache miss by loading the page from disk.
-            return Err(BufferPoolError::Generic(String::from("Handle cache miss.")));
+            // Handle a cache miss by loading the page from disk.
+            // First check if we have any free frames...
+            let free_frame_id = {
+                // Acquire the lock on the free_frames vector.
+                let mut free_frame_guard = self.free_frames.lock().unwrap();
+                if let Some(free_frame_id) = free_frame_guard.pop() {
+                    // Pin the frame inside the lock so we prevent eviction.
+                    self.frames[free_frame_id].increment_pin_count();
+                    Some(free_frame_id)
+                } else {
+                    None
+                }
+            };
+
+            if let Some(frame_id) = free_frame_id {
+                // We have a free frame, so load we can return it since it gets loaded inside the free frame lock.
+                let frame = &self.frames[frame_id];
+                // Load the page from disk into the frame.
+                // TODO: We need to handle a phantom fetch race condition in which multiple threads could potentially load
+                // the same page into different frames.
+                let mut write_guard = self.frames[frame_id].write_data();
+                self.disk_manager
+                    .read_page(page_id, &mut write_guard)
+                    .await
+                    .map_err(|e| {
+                        BufferPoolError::DiskRead(format!(
+                            "Error reading page {} from disk: {}",
+                            page_id, e
+                        ))
+                    })?;
+                Ok(frame)
+            } else {
+                // We had no free frames, so now we have to evict a frame to make free up memory to store the requested page.
+                return Err(BufferPoolError::Generic(String::from(
+                    "Handle frame eviction.",
+                )));
+            }
         }
     }
 }
@@ -250,5 +285,47 @@ mod tests {
 
         assert_eq!(33, read_guard[0]);
         assert_eq!(44, read_guard[1]);
+    }
+
+    #[tokio::test]
+    async fn test_bpm_fetch_page_cache_miss_with_free_frame() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+
+        let table_id = 400;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
+
+        // Setup: Pre-allocate and write a page directly to disk using DiskManager
+        // This simulates a page that exists in the database but is currently NOT in the Buffer Pool
+        let page_id = disk_manager
+            .allocate_page(table_id)
+            .await
+            .expect("Should allocate page");
+        let mut disk_buffer = [0u8; crate::page_id::PAGE_SIZE];
+        disk_buffer[0] = 77;
+        disk_buffer[1] = 88;
+
+        disk_manager
+            .write_page(page_id, &disk_buffer)
+            .await
+            .expect("Should write page directly to disk");
+
+        // Act 1: Initialize BPM
+        let bpm = BufferPoolManager::new(2, disk_manager);
+
+        // Act 2: Fetch the page for reading.
+        // It is NOT in the page table, so it must trigger a cache miss, pop a free frame, and read from disk.
+        let read_guard = bpm
+            .fetch_page_read(page_id)
+            .await
+            .expect("Should fetch page from disk on cache miss");
+
+        // Assert: The data should perfectly match what we wrote to disk
+        assert_eq!(77, read_guard[0]);
+        assert_eq!(88, read_guard[1]);
     }
 }
