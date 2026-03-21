@@ -1,22 +1,34 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 
-use crate::PageId;
 use crate::frame::Frame;
 use crate::page_id::PAGE_SIZE;
+use crate::{Evictor, PageId};
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 /// Read guard that references the underlying frame data. This guard provides a convenient
 /// mechanism for automatically unpinning a frame once the read guard is dropped.
 /////////////////////////////////////////////////////////////////////////////////////////////////
 pub struct PageReadGuard<'a> {
+    // Maintain a reference to the Evictor, so that when the PageReadGuard reference is dropped,
+    // the Evictor's unpin call can be made to keep it in sync with the frame's state.
+    evictor: &'a dyn Evictor,
     frame: &'a Frame,
+    // Lock guard that holds the actual page data.
     lock_guard: RwLockReadGuard<'a, [u8; PAGE_SIZE]>,
 }
 
 impl<'a> PageReadGuard<'a> {
-    pub fn new(frame: &'a Frame, lock_guard: RwLockReadGuard<'a, [u8; PAGE_SIZE]>) -> Self {
-        Self { frame, lock_guard }
+    pub fn new(
+        evictor: &'a dyn Evictor,
+        frame: &'a Frame,
+        lock_guard: RwLockReadGuard<'a, [u8; PAGE_SIZE]>,
+    ) -> Self {
+        Self {
+            evictor,
+            frame,
+            lock_guard,
+        }
     }
 }
 
@@ -34,7 +46,14 @@ impl Deref for PageReadGuard<'_> {
 // page is no longer needed.
 impl Drop for PageReadGuard<'_> {
     fn drop(&mut self) {
-        self.frame.decrement_pin_count();
+        // Important: We only want to call add the frame to the evictor when the frame pin
+        // count transitions from 1 to 0.
+        // The decrement call returns the previous value (calls fetch_sub atomic operation
+        // under the hood), so if it is 1, then we know that the pin count is not zero and
+        // we need to add the frame to the evictor, making the frame eligible for eviction.
+        if self.frame.decrement_pin_count() == 1 {
+            self.evictor.add(self.frame.get_id());
+        }
     }
 }
 
@@ -43,13 +62,24 @@ impl Drop for PageReadGuard<'_> {
 /// mechanism for automatically unpinning a frame once the write guard is dropped.
 /////////////////////////////////////////////////////////////////////////////////////////////////
 pub struct PageWriteGuard<'a> {
+    // Maintain a reference to the Evictor, so that when the PageReadGuard reference is dropped,
+    // the Evictor's unpin call can be made to keep it in sync with the frame's state.
+    evictor: &'a dyn Evictor,
     frame: &'a Frame,
     lock_guard: RwLockWriteGuard<'a, [u8; PAGE_SIZE]>,
 }
 
 impl<'a> PageWriteGuard<'a> {
-    pub fn new(frame: &'a Frame, lock_guard: RwLockWriteGuard<'a, [u8; PAGE_SIZE]>) -> Self {
-        Self { frame, lock_guard }
+    pub fn new(
+        evictor: &'a dyn Evictor,
+        frame: &'a Frame,
+        lock_guard: RwLockWriteGuard<'a, [u8; PAGE_SIZE]>,
+    ) -> Self {
+        Self {
+            evictor,
+            frame,
+            lock_guard,
+        }
     }
 
     pub fn mark_dirty(&self) {
@@ -75,7 +105,14 @@ impl Deref for PageWriteGuard<'_> {
 // page is no longer needed.
 impl Drop for PageWriteGuard<'_> {
     fn drop(&mut self) {
-        self.frame.decrement_pin_count();
+        // Important: We only want to call add the frame to the evictor when the frame pin
+        // count transitions from 1 to 0.
+        // The decrement call returns the previous value (calls fetch_sub atomic operation
+        // under the hood), so if it is 1, then we know that the pin count is not zero and
+        // we need to add the frame to the evictor, making the frame eligible for eviction.
+        if self.frame.decrement_pin_count() == 1 {
+            self.evictor.add(self.frame.get_id());
+        }
     }
 }
 
@@ -87,12 +124,14 @@ impl DerefMut for PageWriteGuard<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::evictor::ClockEvictor;
+
     use super::*;
 
     #[test]
     fn test_page_read_guard_decrements_pin_count_on_drop() {
         // Setup: Create a frame and simulate the Buffer Pool pinning it
-        let frame = Frame::new();
+        let frame = Frame::new(0);
         frame.increment_pin_count();
         assert_eq!(
             1,
@@ -104,7 +143,8 @@ mod tests {
             // Act: Create the guard
             // We pass in both the frame reference and the active lock guard
             let lock_guard = frame.read_data();
-            let page_guard = PageReadGuard::new(&frame, lock_guard);
+            let evictor = ClockEvictor::new(1);
+            let page_guard = PageReadGuard::new(&evictor, &frame, lock_guard);
 
             // Assert 1: Transparent read access via Deref
             // If Deref is implemented correctly, we can index directly into the guard!
@@ -125,7 +165,7 @@ mod tests {
     #[test]
     fn test_page_write_guard_mutates_data_and_cleans_up_on_drop() {
         // Setup: Create a frame and simulate the Buffer Pool pinning it
-        let frame = Frame::new();
+        let frame = Frame::new(0);
         frame.increment_pin_count();
         assert_eq!(1, frame.get_pin_count());
 
@@ -134,7 +174,8 @@ mod tests {
             let lock_guard = frame.write_data();
 
             // Note: Guard must be declared as `mut` because we are going to mutate its contents!
-            let mut page_guard = PageWriteGuard::new(&frame, lock_guard);
+            let evictor = ClockEvictor::new(1);
+            let mut page_guard = PageWriteGuard::new(&evictor, &frame, lock_guard);
 
             // Assert 1: Transparent write access via DerefMut
             page_guard[0] = 42;

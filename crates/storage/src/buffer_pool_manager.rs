@@ -1,17 +1,18 @@
 use std::{
     collections::HashMap,
-    iter,
     sync::{Arc, Mutex},
 };
 
 use tokio::sync::broadcast;
 
 use crate::{
-    BufferPoolError, DiskManager, Frame, PageId, PageReadGuard, page_guard::PageWriteGuard,
+    BufferPoolError, DiskManager, Evictor, Frame, PageId, PageReadGuard, evictor::ClockEvictor,
+    page_guard::PageWriteGuard,
 };
 
 pub struct BufferPoolManager {
     disk_manager: Arc<DiskManager>,
+    evictor: Box<dyn Evictor>,
     /// Cached pages in memory.
     frames: Vec<Frame>,
     /// Free frames available for use.
@@ -35,7 +36,8 @@ impl BufferPoolManager {
 
         BufferPoolManager {
             disk_manager,
-            frames: iter::repeat_with(Frame::new).take(size).collect(),
+            evictor: Box::new(ClockEvictor::new(size)),
+            frames: (0..size).map(|i| Frame::new(i)).collect(),
             free_frames: Mutex::new(initial_frames),
             in_flight_fetches: Mutex::new(HashMap::new()),
             page_table: Mutex::new(HashMap::new()),
@@ -69,7 +71,11 @@ impl BufferPoolManager {
 
         // Acquire the write lock, contruct and return the page write guard with a reference to the frame.
         let write_lock = free_frame.write_data();
-        Ok(PageWriteGuard::new(free_frame, write_lock))
+        Ok(PageWriteGuard::new(
+            self.evictor.as_ref(),
+            free_frame,
+            write_lock,
+        ))
     }
 
     /// Fetches a page and returns it, wrapped in a shared read lock guard that will unpin
@@ -79,9 +85,9 @@ impl BufferPoolManager {
         page_id: PageId,
     ) -> Result<PageReadGuard<'_>, BufferPoolError> {
         // Call the private helper to return a pinned frame containing the page data.
-        if let Ok(frame) = self.pin_frame(page_id).await {
+        if let Ok(frame) = self.fetch_and_pin_frame(page_id).await {
             let read_lock = frame.read_data();
-            Ok(PageReadGuard::new(frame, read_lock))
+            Ok(PageReadGuard::new(self.evictor.as_ref(), frame, read_lock))
         } else {
             return Err(BufferPoolError::BufferFull);
         }
@@ -94,9 +100,13 @@ impl BufferPoolManager {
         page_id: PageId,
     ) -> Result<PageWriteGuard<'_>, BufferPoolError> {
         // Call the private helper to return a pinned frame containing the page data.
-        if let Ok(frame) = self.pin_frame(page_id).await {
+        if let Ok(frame) = self.fetch_and_pin_frame(page_id).await {
             let write_lock = frame.write_data();
-            Ok(PageWriteGuard::new(frame, write_lock))
+            Ok(PageWriteGuard::new(
+                self.evictor.as_ref(),
+                frame,
+                write_lock,
+            ))
         } else {
             return Err(BufferPoolError::BufferFull);
         }
@@ -105,11 +115,10 @@ impl BufferPoolManager {
     /// Attempts to find the page in the cache. Upon a cache miss, if a free frame is available, the
     /// page is read from disk and loaded into the free frame. If no free frames are available, the
     /// evictor is called to evict a page from the cache to free up a frame.
-    async fn pin_frame(&self, page_id: PageId) -> Result<&Frame, BufferPoolError> {
+    async fn fetch_and_pin_frame(&self, page_id: PageId) -> Result<&Frame, BufferPoolError> {
         // Check the page table to see if the page is cached...
         // Only hold the lock long enough to fetch the frame ID and pin it...
         let cached_frame_id = {
-            // TODO: Re-evaluate whether we need to hold this lock while we check for in-flight requests.
             let page_table_guard = self.page_table.lock().unwrap();
             // We make a copy of the frame ID because the page table HashMap will return a reference to
             // the frame ID value in memory which can't be guaranteed to be valid after the lock is released
@@ -122,8 +131,7 @@ impl BufferPoolManager {
             if let Some(&frame_id) = page_table_guard.get(&page_id) {
                 // We must pin the frame inside the lock to guarantee that it will not be evicted by another
                 // thread prior to the current read completing.
-                self.frames[frame_id].increment_pin_count();
-                // TODO: Remove this frame from the evictor.
+                self.pin_frame(frame_id);
                 Some(frame_id)
             } else {
                 None
@@ -147,7 +155,7 @@ impl BufferPoolManager {
                 let mut receiver = in_flight_channel.subscribe();
                 // Drop our mutex on the in flight map so others can access it.
                 drop(in_flight_guard);
-                // TODO: Should we still have the page table mutext held when we get here?
+                // Wait for the in-flight page request to complete.
                 let frame_id = receiver.recv().await.map_err(|e| {
                     BufferPoolError::InFlightBroadcast(format!(
                         "Error waiting on in flight fetch for page {}: {}",
@@ -167,63 +175,73 @@ impl BufferPoolManager {
                 // Now that we have our broadcast channel set up we can drop our mutexes and allow other threads to
                 // check for in flight fetches.
                 drop(in_flight_guard);
-                // TODO: Should we still have the page table mutext held when we get here?
                 // Handle a cache miss by loading the page from disk.
                 // First check if we have any free frames...
-                let free_frame_id = {
+                let frame_id = {
                     // Acquire the lock on the free_frames vector.
                     let mut free_frame_guard = self.free_frames.lock().unwrap();
                     if let Some(free_frame_id) = free_frame_guard.pop() {
                         // Pin the frame inside the lock so we prevent eviction.
                         self.frames[free_frame_id].increment_pin_count();
-                        Some(free_frame_id)
+                        free_frame_id
                     } else {
-                        None
+                        // We had no free frames, so now we have to evict a frame to free up memory to store the requested page.
+                        if let Some(free_frame_id) = self.evictor.victim() {
+                            // We found a victim, so now we can load our page into the free frame.
+                            self.frames[free_frame_id].increment_pin_count();
+                            free_frame_id
+                        } else {
+                            return Err(BufferPoolError::BufferFull);
+                        }
                     }
                 };
 
-                if let Some(frame_id) = free_frame_id {
-                    // We have a free frame, so load we can return it since it gets loaded inside the free frame lock.
-                    let frame = &self.frames[frame_id];
-                    // Load the page from disk into the frame.
-                    // TODO: We need to handle a phantom fetch race condition in which multiple threads could potentially load
-                    // the same page into different frames.
-                    let mut write_guard = self.frames[frame_id].write_data();
-                    self.disk_manager
-                        .read_page(page_id, &mut write_guard)
-                        .await
-                        .map_err(|e| {
-                            BufferPoolError::DiskRead(format!(
-                                "Error reading page {} from disk: {}",
-                                page_id, e
-                            ))
-                        })?;
-                    // The leader is done loading in the page, so now it needs to broadcast a message to any other threads that
-                    // are waiting on this page to be cached.
-                    // Acquire the locks
-                    let mut page_table_guard = self.page_table.lock().unwrap();
-                    let mut in_flight_fetches_guard = self.in_flight_fetches.lock().unwrap();
-                    // We've already pinned the frame in the free frames mutex above, so we don't need to pin it again...
-                    // We do need to set the page ID
-                    self.frames[frame_id].set_page_id(Some(page_id));
-                    // Update the page table with the newly cached page...
-                    page_table_guard.insert(page_id, frame_id);
+                // If we reach this point, we have a free frame available, either one that's never been used
+                // or one returned as a result of an eviction.
+                let frame = &self.frames[frame_id];
+                // Load the page from disk into the frame.
+                let mut write_guard = self.frames[frame_id].write_data();
+                self.disk_manager
+                    .read_page(page_id, &mut write_guard)
+                    .await
+                    .map_err(|e| {
+                        BufferPoolError::DiskRead(format!(
+                            "Error reading page {} from disk: {}",
+                            page_id, e
+                        ))
+                    })?;
+                // The leader is done loading in the page, so now it needs to broadcast a message to any other threads that
+                // are waiting on this page to be cached.
+                // Acquire the locks
+                let mut page_table_guard = self.page_table.lock().unwrap();
+                let mut in_flight_fetches_guard = self.in_flight_fetches.lock().unwrap();
+                // We've already pinned the frame in the free frames mutex above, so we don't need to pin it again...
+                // We do need to set the page ID
+                self.frames[frame_id].set_page_id(Some(page_id));
+                // Update the page table with the newly cached page...
+                page_table_guard.insert(page_id, frame_id);
 
-                    // Remove the page ID from the in flight fetches map and get the transmitter...
-                    if let Some(tx) = in_flight_fetches_guard.remove(&page_id) {
-                        // Notify other threads that the page fetch is complete.
-                        let _ = tx.send(frame_id);
-                    }
-
-                    Ok(frame)
-                } else {
-                    // TODO: Handle a cache miss with no free frames available.
-                    // We had no free frames, so now we have to evict a frame to make free up memory to store the requested page.
-                    return Err(BufferPoolError::Generic(String::from(
-                        "Handle frame eviction.",
-                    )));
+                // Remove the page ID from the in flight fetches map and get the transmitter...
+                if let Some(tx) = in_flight_fetches_guard.remove(&page_id) {
+                    // Notify other threads that the page fetch is complete.
+                    let _ = tx.send(frame_id);
                 }
+
+                Ok(frame)
             }
+        }
+    }
+
+    /// Pins the frame and updates the evictor state to keep them in sync. If the frame
+    /// is pinned, then the evictor does not consider it elegible for eviction.
+    fn pin_frame(&self, frame_id: usize) {
+        // Increment the frame's pin count. If the previous pin count was zero, then
+        // this operation has transitioned the frame from unpinned to pinned which
+        // means we must tell the evictor to remove the frame from eviction eligibility.
+        // If the frame pin operation does not cause the frame to go from unpinned to
+        // pinned, then there is no need to update the evictor.
+        if self.frames[frame_id].increment_pin_count() == 0 {
+            self.evictor.remove(frame_id);
         }
     }
 
@@ -496,5 +514,65 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn test_bpm_fetch_page_evicts_unpinned_frame_when_full() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+
+        let table_id = 600;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
+
+        // Setup: Pre-allocate 3 pages directly on disk
+        let page_id_1 = disk_manager.allocate_page(table_id).await.unwrap();
+        let page_id_2 = disk_manager.allocate_page(table_id).await.unwrap();
+        let page_id_3 = disk_manager.allocate_page(table_id).await.unwrap();
+
+        let mut buf1 = [0u8; crate::page_id::PAGE_SIZE];
+        buf1[0] = 11;
+        let mut buf2 = [0u8; crate::page_id::PAGE_SIZE];
+        buf2[0] = 22;
+        let mut buf3 = [0u8; crate::page_id::PAGE_SIZE];
+        buf3[0] = 33;
+
+        disk_manager.write_page(page_id_1, &buf1).await.unwrap();
+        disk_manager.write_page(page_id_2, &buf2).await.unwrap();
+        disk_manager.write_page(page_id_3, &buf3).await.unwrap();
+
+        // Act 1: Initialize BPM with ONLY 2 free frames
+        let bpm = BufferPoolManager::new(2, disk_manager);
+
+        // Act 2: Fill the buffer pool completely
+        {
+            let guard1 = bpm.fetch_page_read(page_id_1).await.unwrap();
+            let guard2 = bpm.fetch_page_read(page_id_2).await.unwrap();
+
+            assert_eq!(11, guard1[0]);
+            assert_eq!(22, guard2[0]);
+
+            assert_eq!(
+                0,
+                bpm.get_free_frame_count(),
+                "Pool should be completely full"
+            );
+        } // guard1 and guard2 go out of scope here. The pin_counts for both frames drop to 0!
+
+        // Act 3: Fetch the 3rd page.
+        // We have 0 free frames, so this MUST consult the ClockEvictor, evict an unpinned frame, and reuse it.
+        let guard3 = bpm
+            .fetch_page_read(page_id_3)
+            .await
+            .expect("Should successfully evict a frame and fetch page 3");
+
+        // Assert: We got the correct data for page 3
+        assert_eq!(
+            33, guard3[0],
+            "Evicted frame should contain the newly loaded data"
+        );
     }
 }

@@ -1,14 +1,16 @@
 use std::sync::Mutex;
 
-pub trait Evictor {
-    // Pin a frame to prevent eviction.
-    fn pin(&self, frame_id: usize);
+pub trait Evictor: Send + Sync {
+    // Adds a frame at the given index/ID to the evictor, making
+    // it eligible for eviction.
+    fn add(&self, frame_id: usize);
+
+    // Removes a frame from the evictor making it ineligible for
+    // eviction.
+    fn remove(&self, frame_id: usize);
 
     // The number of frames eligible for eviction.
     fn size(&self) -> usize;
-
-    // Unpins a frame at the given index/ID.
-    fn unpin(&self, frame_id: usize);
 
     // Evicts a frame and returns the frame ID.
     fn victim(&self) -> Option<usize>;
@@ -54,18 +56,7 @@ impl ClockEvictor {
 }
 
 impl Evictor for ClockEvictor {
-    fn pin(&self, frame_id: usize) {
-        let mut state = self.state.lock().unwrap();
-        state.is_in_evictor[frame_id] = false;
-        state.size -= 1;
-    }
-
-    fn size(&self) -> usize {
-        let state = self.state.lock().unwrap();
-        state.size
-    }
-
-    fn unpin(&self, frame_id: usize) {
+    fn add(&self, frame_id: usize) {
         let mut state = self.state.lock().unwrap();
 
         if !state.is_in_evictor[frame_id] {
@@ -78,6 +69,20 @@ impl Evictor for ClockEvictor {
         // it again, meaning there has been another interaction with this frame,
         // earning it a second chance to remain cached.
         state.second_chances[frame_id] = true;
+    }
+
+    fn remove(&self, frame_id: usize) {
+        let mut state = self.state.lock().unwrap();
+        // Only update the state here if the frame is currently in the evictor.
+        if state.is_in_evictor[frame_id] {
+            state.is_in_evictor[frame_id] = false;
+            state.size -= 1;
+        }
+    }
+
+    fn size(&self) -> usize {
+        let state = self.state.lock().unwrap();
+        state.size
     }
 
     fn victim(&self) -> Option<usize> {
@@ -132,7 +137,7 @@ mod tests {
         let evictor = ClockEvictor::new(3);
 
         // Unpinning a frame adds it to the evictor
-        evictor.unpin(0);
+        evictor.add(0);
         assert_eq!(
             1,
             evictor.size(),
@@ -140,7 +145,7 @@ mod tests {
         );
 
         // Unpinning the same frame again should not increase the size
-        evictor.unpin(0);
+        evictor.add(0);
         assert_eq!(
             1,
             evictor.size(),
@@ -164,9 +169,9 @@ mod tests {
 
         // Setup: Unpin 0, 1, and 2. Hand starts at 0.
         // State: [0: true, 1: true, 2: true, 3: empty]
-        evictor.unpin(0);
-        evictor.unpin(1);
-        evictor.unpin(2);
+        evictor.add(0);
+        evictor.add(1);
+        evictor.add(2);
 
         // First Sweep:
         // - Hand at 0 (true -> false), advances to 1
@@ -183,7 +188,7 @@ mod tests {
         // Current State: Hand is at 1. [1: false, 2: false] are in the evictor.
 
         // Re-arm: We unpin 2 again. This must flip its second chance back to true!
-        evictor.unpin(2);
+        evictor.add(2);
 
         // Second Sweep:
         // - Hand starts at 1. Its bit is still false -> EVICT immediately! Returns 1. Hand advances to 2.
@@ -212,13 +217,13 @@ mod tests {
         let evictor = ClockEvictor::new(3);
 
         // Setup: Unpin all frames
-        evictor.unpin(0);
-        evictor.unpin(1);
-        evictor.unpin(2);
+        evictor.add(0);
+        evictor.add(1);
+        evictor.add(2);
         assert_eq!(3, evictor.size());
 
         // Pinning frame 1 should remove it from the evictor entirely
-        evictor.pin(1);
+        evictor.remove(1);
         assert_eq!(2, evictor.size(), "Size should decrease after pinning");
 
         // First Sweep:

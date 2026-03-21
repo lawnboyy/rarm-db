@@ -6,28 +6,36 @@ use crate::{PageId, page_id::PAGE_SIZE};
 
 pub struct Frame {
     data: RwLock<[u8; PAGE_SIZE]>,
+    id: usize,
     is_dirty: AtomicBool,
     page_id: RwLock<Option<PageId>>,
     pin_count: AtomicUsize,
 }
 
 impl Frame {
-    pub fn new() -> Self {
+    pub fn new(id: usize) -> Self {
         Frame {
             data: RwLock::new([0u8; PAGE_SIZE]),
+            id,
             page_id: RwLock::new(None),
             pin_count: 0.into(),
             is_dirty: false.into(),
         }
     }
 
-    pub fn decrement_pin_count(&self) {
+    pub fn decrement_pin_count(&self) -> usize {
         // Read the pin count, decrement the value, write back in a single atomic operation.
         let prev_count = self.pin_count.fetch_sub(1, Ordering::SeqCst);
         assert!(
             prev_count > 0,
             "Pin count underflow! Attempted to unpin a frame that was not pinned."
         );
+
+        prev_count
+    }
+
+    pub fn get_id(&self) -> usize {
+        self.id
     }
 
     pub fn get_page_id(&self) -> Option<PageId> {
@@ -41,9 +49,9 @@ impl Frame {
         self.pin_count.load(Ordering::SeqCst)
     }
 
-    pub fn increment_pin_count(&self) {
+    pub fn increment_pin_count(&self) -> usize {
         // Read the pin count, add 1, and write the value out in a single atomic operation.
-        self.pin_count.fetch_add(1, Ordering::SeqCst);
+        self.pin_count.fetch_add(1, Ordering::SeqCst)
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -71,7 +79,7 @@ impl Frame {
 
 impl Default for Frame {
     fn default() -> Self {
-        Self::new()
+        Self::new(0)
     }
 }
 
@@ -82,7 +90,7 @@ mod tests {
     #[test]
     fn test_frame_new_initializes_empty_state() {
         // Act
-        let frame = Frame::new();
+        let frame = Frame::new(0);
 
         // Assert
         assert_eq!(
@@ -112,7 +120,7 @@ mod tests {
 
     #[test]
     fn test_frame_metadata_and_data_mutability() {
-        let frame = Frame::new();
+        let frame = Frame::new(0);
 
         // 1. Test Page ID mutation
         // Note: You will need to add a RwLock around the PageId, or use an Atomic/Mutex
