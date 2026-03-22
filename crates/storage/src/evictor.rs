@@ -18,7 +18,7 @@ pub trait Evictor: Send + Sync {
 
 pub struct ClockEvictorState {
     // Index that the clock hand currently points to.
-    clock_hand: usize,
+    clock_hand_pos: usize,
     // For each frame in the evictor we'll track a reference bit as a second chance.
     // This will be set to true when a frame is added to the evictor. When the clock
     // hand sweeps to find a victim, if the reference bit is true, it will be set
@@ -29,9 +29,6 @@ pub struct ClockEvictorState {
 
     // Look up table that indicates if a frame is eligible for eviction.
     is_in_evictor: Vec<bool>,
-
-    // This is the clock hand position which is bounded by [0..pool_size -1].
-    // hand_position: usize,
 
     // The size refers to the number of evicted frames available for reuse by the BPM.
     size: usize,
@@ -44,9 +41,8 @@ pub struct ClockEvictor {
 impl ClockEvictor {
     pub fn new(pool_size: usize) -> Self {
         let state = Mutex::new(ClockEvictorState {
-            clock_hand: 0,
+            clock_hand_pos: 0,
             is_in_evictor: vec![false; pool_size],
-            // hand_position: 0,
             second_chances: vec![false; pool_size],
             size: 0,
         });
@@ -89,7 +85,7 @@ impl Evictor for ClockEvictor {
         // Use the clock replacer aglorithm to find a victim frame.
         // First lock mutex to access the inner state...
         let mut state = self.state.lock().unwrap();
-        let mut i = state.clock_hand;
+        let mut i = state.clock_hand_pos;
         let len = state.is_in_evictor.len();
         // Loop through the added frames at least twice and check their reference bit.
         for _ in 0..(len * 2) {
@@ -100,7 +96,7 @@ impl Evictor for ClockEvictor {
                     state.is_in_evictor[i] = false;
                     state.size -= 1;
                     // Move the clock hand position past the evicted frame.
-                    state.clock_hand = (i + 1) % len;
+                    state.clock_hand_pos = (i + 1) % len;
                     return Some(i);
                 } else {
                     state.second_chances[i] = false;
@@ -111,7 +107,7 @@ impl Evictor for ClockEvictor {
             i = (i + 1) % len;
         }
 
-        state.clock_hand = i;
+        state.clock_hand_pos = i;
         None
     }
 }
