@@ -141,7 +141,8 @@ impl DiskManager {
         // First get the file handle for this table from the page ID...
         let file_handle = self.get_file_handle(page_id.table_id).await?;
 
-        file_handle
+        // TODO: We should return the bytes read so the caller can handle an unexpected read value.
+        let _ = file_handle
             .read_at(buffer, page_id.page_index as u64 * PAGE_SIZE as u64)
             .await?;
 
