@@ -164,7 +164,7 @@ impl BufferPoolManager {
                 })?;
                 // The in flight request of the page is complete, so the frame should contain the requested page
                 // data. Now we pin it and return.
-                self.frames[frame_id].increment_pin_count();
+                self.pin_frame(frame_id);
                 return Ok(&self.frames[frame_id]);
             } else {
                 // There was no in flight request, and we still hold the mutex for the in flight fetches map. So
@@ -182,13 +182,14 @@ impl BufferPoolManager {
                     let mut free_frame_guard = self.free_frames.lock().unwrap();
                     if let Some(free_frame_id) = free_frame_guard.pop() {
                         // Pin the frame inside the lock so we prevent eviction.
-                        self.frames[free_frame_id].increment_pin_count();
+                        self.pin_frame(free_frame_id);
                         free_frame_id
                     } else {
                         // We had no free frames, so now we have to evict a frame to free up memory to store the requested page.
                         if let Some(free_frame_id) = self.evictor.victim() {
+                            // TODO: Flush the frame to disk if it's dirty.
                             // We found a victim, so now we can load our page into the free frame.
-                            self.frames[free_frame_id].increment_pin_count();
+                            self.pin_frame(free_frame_id);
                             free_frame_id
                         } else {
                             return Err(BufferPoolError::BufferFull);
@@ -575,4 +576,66 @@ mod tests {
             "Evicted frame should contain the newly loaded data"
         );
     }
+
+    // #[tokio::test]
+    // async fn test_bpm_evicts_dirty_frame_and_writes_to_disk() {
+    //     let dir = tempdir().unwrap();
+    //     let fs = Arc::new(TokioFileSystem::new());
+    //     let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+
+    //     let table_id = 700;
+    //     disk_manager
+    //         .create_table_file(table_id)
+    //         .await
+    //         .expect("Should create table file");
+
+    //     // Setup: Pre-allocate 2 pages directly on disk
+    //     let page_id_1 = disk_manager.allocate_page(table_id).await.unwrap();
+    //     let page_id_2 = disk_manager.allocate_page(table_id).await.unwrap();
+
+    //     // Act 1: Initialize BPM with ONLY 1 frame to force immediate evictions
+    //     let bpm = BufferPoolManager::new(1, disk_manager);
+
+    //     // Act 2: Fetch Page 1, modify it, and mark it DIRTY
+    //     {
+    //         let mut guard1 = bpm.fetch_page_write(page_id_1).await.unwrap();
+
+    //         // Write some recognizable magic bytes
+    //         guard1[0] = 123;
+    //         guard1[1] = 234;
+
+    //         // CRITICAL: We tell the guard that this page has been modified
+    //         guard1.mark_dirty();
+    //     }
+    //     // guard1 drops here.
+    //     // The pin count for Frame 0 drops to 0, and the evictor is notified via `evictor.add()`.
+
+    //     // Act 3: Fetch Page 2.
+    //     // We only have 1 frame, so this forces a cache miss. The BPM MUST consult the evictor,
+    //     // select Frame 0 as the victim, and recognize that Frame 0 is dirty.
+    //     // It MUST write Page 1 to disk before loading Page 2!
+    //     {
+    //         let guard2 = bpm.fetch_page_read(page_id_2).await.unwrap();
+
+    //         // Just verifying we got Page 2 successfully (it should be empty/zeroed out)
+    //         assert_eq!(0, guard2[0], "Page 2 should be empty/zeroed");
+    //     }
+    //     // guard2 drops here. Frame 0 is now unpinned again, holding Page 2.
+
+    //     // Act 4: Fetch Page 1 AGAIN.
+    //     // This forces another cache miss, evicting Page 2, and reading Page 1 back from disk.
+    //     let guard1_reloaded = bpm.fetch_page_read(page_id_1).await.unwrap();
+
+    //     // Assert: The Phantom Data Check!
+    //     // If the BPM didn't flush the dirty page to disk during Act 3,
+    //     // it will just read the original, empty page from disk, and these assertions will fail!
+    //     assert_eq!(
+    //         123, guard1_reloaded[0],
+    //         "Dirty page was not flushed to disk before eviction!"
+    //     );
+    //     assert_eq!(
+    //         234, guard1_reloaded[1],
+    //         "Dirty page was not flushed to disk before eviction!"
+    //     );
+    // }
 }
