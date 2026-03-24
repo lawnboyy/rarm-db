@@ -56,14 +56,16 @@ impl BufferPoolManager {
         // Check for a free frame. If no free frame is available, evict a frame.
         // Acquire the lock on the free frames to see if any are available.
         let frame_id = if let Some(id) = self.free_frames.lock().unwrap().pop() {
+            self.pin_frame(id);
             id
         } else {
-            todo!("Handle frame eviction.");
+            // There are no free frames available so we must evict a page.
+            // This method pins the frame.
+            self.evict_page().await.unwrap()
         };
 
         // Pin the frame and set the page ID...
         let free_frame = &self.frames[frame_id];
-        free_frame.increment_pin_count();
         free_frame.set_page_id(Some(page_id));
 
         // Add the page ID to the page table.
@@ -185,43 +187,8 @@ impl BufferPoolManager {
                         self.pin_frame(free_frame_id);
                         free_frame_id
                     } else {
-                        // Remove the victimized frame from the page table...
-                        // TODO: What needs to be wrapped in the page table lock?
-                        let mut page_table_guard = self.page_table.lock().unwrap();
-                        // We had no free frames, so now we have to evict a frame to free up memory to store the requested page.
-                        if let Some(free_frame_id) = self.evictor.victim() {
-                            let victim_page_id = self.frames[free_frame_id].get_page_id().unwrap();
-                            // Flush the frame to disk if it's dirty.
-                            if self.frames[free_frame_id].is_dirty() {
-                                let buffer_to_write = self.frames[free_frame_id].read_data();
-                                let result = self
-                                    .disk_manager
-                                    .write_page(victim_page_id, &buffer_to_write)
-                                    .await;
-                                if let Err(error) = result {
-                                    return Err(BufferPoolError::DiskWrite(format!(
-                                        "Could not write page: {} to disk! Error: {}",
-                                        page_id, error
-                                    )));
-                                }
-
-                                // The evicted page has been written to disk at this point so we can
-                                // now reset the free frame's data...
-                                // TODO: Do we need to zero out the data? The code below to read the
-                                // page from disk should overwrite whatever was previously in the frame's
-                                // data buffer.
-                            }
-
-                            // Now that we have a victim we can remove it from the page table...
-                            page_table_guard.remove(&victim_page_id);
-
-                            // We found a victim, so now we can load our page into the free frame.
-                            self.pin_frame(free_frame_id);
-                            free_frame_id
-                        } else {
-                            // No frames were eligible for eviction, so we must return an error.
-                            return Err(BufferPoolError::BufferFull);
-                        }
+                        // If no free frames are available, then attempt to evict a page.
+                        self.evict_page().await?
                     }
                 };
 
@@ -258,6 +225,45 @@ impl BufferPoolManager {
 
                 Ok(frame)
             }
+        }
+    }
+
+    async fn evict_page(&self) -> Result<usize, BufferPoolError> {
+        // Remove the victimized frame from the page table...
+        // TODO: What needs to be wrapped in the page table lock?
+        // TODO: We cannot hold the page table lock across the disk manager write call because it is asynchronous.
+        let mut page_table_guard = self.page_table.lock().unwrap();
+        // We had no free frames, so now we have to evict a frame to free up memory to store the requested page.
+        if let Some(free_frame_id) = self.evictor.victim() {
+            let victim_page_id = self.frames[free_frame_id].get_page_id().unwrap();
+            // Now that we have a victim we can remove it from the page table...
+            page_table_guard.remove(&victim_page_id);
+
+            // We found a victim, so now we can pin it.
+            self.pin_frame(free_frame_id);
+
+            // Drop the lock before we flush to disk.
+            drop(page_table_guard);
+
+            // Flush the frame to disk if it's dirty.
+            if self.frames[free_frame_id].is_dirty() {
+                let buffer_to_write = self.frames[free_frame_id].read_data();
+                let result = self
+                    .disk_manager
+                    .write_page(victim_page_id, &buffer_to_write)
+                    .await;
+                if let Err(error) = result {
+                    return Err(BufferPoolError::DiskWrite(format!(
+                        "Could not write page: {} to disk! Error: {}",
+                        victim_page_id, error
+                    )));
+                }
+            }
+
+            Ok(free_frame_id)
+        } else {
+            // No frames were eligible for eviction, so we must return an error.
+            return Err(BufferPoolError::BufferFull);
         }
     }
 
@@ -697,6 +703,45 @@ mod tests {
         assert!(
             result.is_err(),
             "BPM should return an error when no frames are available for eviction"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bpm_create_page_evicts_frame_when_full() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+
+        let table_id = 900;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
+
+        // Setup: Pre-allocate 1 page directly on disk
+        let page_id_1 = disk_manager.allocate_page(table_id).await.unwrap();
+
+        // Act 1: Initialize BPM with ONLY 1 frame
+        let bpm = BufferPoolManager::new(1, disk_manager);
+
+        // Act 2: Fill the buffer pool completely
+        {
+            let _guard1 = bpm.fetch_page_read(page_id_1).await.unwrap();
+        } // guard1 goes out of scope, Frame 0 is unpinned and eligible for eviction
+
+        // Act 3: Create a NEW page!
+        // This should trigger the DiskManager to allocate a new page,
+        // AND trigger the BPM to evict Page 1 to make room for it in memory.
+        let guard2 = bpm
+            .create_page(table_id)
+            .await
+            .expect("Should successfully evict a frame and create a new page");
+
+        // Assert: We got a new page with the next sequential index (1)
+        assert_eq!(
+            1,
+            guard2.page_id().page_index,
+            "The newly created page should have index 1"
         );
     }
 }
