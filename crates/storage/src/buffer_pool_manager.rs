@@ -181,8 +181,9 @@ impl BufferPoolManager {
                 // First check if we have any free frames...
                 let frame_id = {
                     // Acquire the lock on the free_frames vector.
-                    let mut free_frame_guard = self.free_frames.lock().unwrap();
-                    if let Some(free_frame_id) = free_frame_guard.pop() {
+                    // Make sure we only hold the lock for the 'if' block because the 'else' block contains an 'await'
+                    // call and we cannot hold the lock across an await boundary.
+                    if let Some(free_frame_id) = self.free_frames.lock().unwrap().pop() {
                         // Pin the frame inside the lock so we prevent eviction.
                         self.pin_frame(free_frame_id);
                         free_frame_id
