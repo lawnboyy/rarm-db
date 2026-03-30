@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fmt::Error,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use tokio::sync::broadcast;
@@ -230,9 +230,11 @@ impl BufferPoolManager {
     //     }
     // }
 
-    fn evict_page(&self) -> Result<(usize, Option<(PageId, [u8; PAGE_SIZE])>), BufferPoolError> {
+    fn evict_page(
+        &self,
+        page_table_guard: &mut MutexGuard<'_, HashMap<PageId, usize>>,
+    ) -> Result<(usize, Option<(PageId, [u8; PAGE_SIZE])>), BufferPoolError> {
         // Lock the page table while attempt to evict a page...
-        let mut page_table_guard = self.page_table.lock().unwrap();
         if let Some(free_frame_id) = self.evictor.victim() {
             let victim_page_id = self.frames[free_frame_id].get_page_id().unwrap();
             // Now that we have a victim we can remove it from the page table...
@@ -748,7 +750,10 @@ mod tests {
         bpm.pin_frame(0);
 
         // Act 3: Attempt to evict a page
-        let result = bpm.evict_page();
+        let result = {
+            let mut page_table_guard = bpm.page_table.lock().unwrap();
+            bpm.evict_page(&mut page_table_guard)
+        };
 
         // Assert: It MUST gracefully return an error
         assert!(
@@ -780,7 +785,10 @@ mod tests {
         bpm.evictor.add(0);
 
         // Act: Evict the page
-        let result = bpm.evict_page();
+        let result = {
+            let mut page_table_guard = bpm.page_table.lock().unwrap();
+            bpm.evict_page(&mut page_table_guard)
+        };
 
         // Assert 1: It should succeed, return frame 0, and return None for the dirty data
         assert!(
@@ -832,7 +840,10 @@ mod tests {
         bpm.evictor.add(0);
 
         // Act: Evict the page
-        let result = bpm.evict_page();
+        let result = {
+            let mut page_table_guard = bpm.page_table.lock().unwrap();
+            bpm.evict_page(&mut page_table_guard)
+        };
 
         // Assert 1: It should succeed and return Some(...) for the dirty data
         let (frame_id, dirty_payload_opt) = result.expect("Should successfully evict");
