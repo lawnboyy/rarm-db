@@ -4,5 +4,6 @@ pub enum BufferPoolError {
     DiskRead(String),
     DiskWrite(String),
     Generic(String),
-    InFlightBroadcast(String),
+    PageProcessingBroadcast(String),
+    PageAllocation(String),
 }

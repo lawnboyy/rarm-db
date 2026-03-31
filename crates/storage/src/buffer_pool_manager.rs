@@ -22,7 +22,7 @@ pub struct BufferPoolManager {
     /// allows other threads that are accessing a page to subcribe to an in-
     /// flight request for the page and sleep until the disk read is complete
     /// and the page is cached.
-    in_flight_fetches: Mutex<HashMap<PageId, broadcast::Sender<usize>>>,
+    page_io_processing: Mutex<HashMap<PageId, broadcast::Sender<usize>>>,
     /// Map of currently cached pages to the frame ID that holds them.
     page_table: Mutex<HashMap<PageId, usize>>,
 }
@@ -40,46 +40,91 @@ impl BufferPoolManager {
             evictor: Box::new(ClockEvictor::new(size)),
             frames: (0..size).map(|i| Frame::new(i)).collect(),
             free_frames: Mutex::new(initial_frames),
-            in_flight_fetches: Mutex::new(HashMap::new()),
+            page_io_processing: Mutex::new(HashMap::new()),
             page_table: Mutex::new(HashMap::new()),
         }
     }
 
-    // pub async fn create_page(&self, table_id: u32) -> Result<PageWriteGuard<'_>, String> {
-    //     // Let's create our new page using the disk manager...
-    //     let page_id = self
-    //         .disk_manager
-    //         .allocate_page(table_id)
-    //         .await
-    //         // TODO: Consider doing some better error handling here instead of returning a string.
-    //         .map_err(|e| e.to_string())?;
+    pub async fn create_page(&self, table_id: u32) -> Result<PageWriteGuard<'_>, BufferPoolError> {
+        // Let's create our new page using the disk manager...
+        let page_id = self
+            .disk_manager
+            .allocate_page(table_id)
+            .await
+            // TODO: Consider doing some better error handling here instead of returning a string.
+            .map_err(|e| BufferPoolError::PageAllocation(e.to_string()))?;
 
-    //     // Check for a free frame. If no free frame is available, evict a frame.
-    //     // Acquire the lock on the free frames to see if any are available.
-    //     let frame_id = if let Some(id) = self.free_frames.lock().unwrap().pop() {
-    //         self.pin_frame(id);
-    //         id
-    //     } else {
-    //         // There are no free frames available so we must evict a page.
-    //         // This method pins the frame.
-    //         self.evict_page().await.unwrap()
-    //     };
+        let mut page_table_guard = self.page_table.lock().unwrap();
 
-    //     // Pin the frame and set the page ID...
-    //     let free_frame = &self.frames[frame_id];
-    //     free_frame.set_page_id(Some(page_id));
+        // Placeholder for dirty page data if we need to flush an evicted page...
+        let mut page_data: Option<(PageId, [u8; PAGE_SIZE])> = None;
 
-    //     // Add the page ID to the page table.
-    //     self.page_table.lock().unwrap().insert(page_id, frame_id);
+        // Check for a free frame. If no free frame is available, evict a frame.
+        // Acquire the lock on the free frames to see if any are available.
+        let frame_id = if let Some(id) = self.free_frames.lock().unwrap().pop() {
+            self.pin_frame(id);
+            id
+        } else {
+            // There are no free frames available so we must evict a page.
+            let mut page_processing_guard = self.page_io_processing.lock().unwrap();
+            // This method pins the frame.
+            let evicted_page_data = self.evict_page(&mut page_table_guard).unwrap();
+            let free_frame_id = evicted_page_data.0;
+            page_data = evicted_page_data.1;
 
-    //     // Acquire the write lock, contruct and return the page write guard with a reference to the frame.
-    //     let write_lock = free_frame.write_data();
-    //     Ok(PageWriteGuard::new(
-    //         self.evictor.as_ref(),
-    //         free_frame,
-    //         write_lock,
-    //     ))
-    // }
+            // If the evicted page was dirty, we need to flush it to disk before we release the page_table lock,
+            // and we need to add a processing channel to notify other threads that this page is getting flushed.
+            if self.frames[free_frame_id].is_dirty() {
+                // Create a channel to notify other threads that this page is processing...
+                let (tx, _rx) = broadcast::channel::<usize>(1);
+                page_processing_guard.insert(page_id, tx.clone());
+                // Now that we have our broadcast channel set up we can drop our mutexes and allow other threads to
+                // check if this page is being processed...
+                drop(page_processing_guard);
+            }
+
+            free_frame_id
+        };
+
+        // Pin the frame and set the page ID...
+        let free_frame = &self.frames[frame_id];
+        free_frame.set_page_id(Some(page_id));
+
+        // Add the page ID to the page table.
+        page_table_guard.insert(page_id, frame_id);
+        // self.page_table.lock().unwrap().insert(page_id, frame_id);
+
+        drop(page_table_guard);
+
+        // Now that we have dropped the locks we can flush the dirty page data to disk if necessary...
+        if let Some((page_to_flush_id, page_data)) = page_data {
+            let result = self
+                .disk_manager
+                .write_page(page_to_flush_id, &page_data)
+                .await;
+            if let Err(error) = result {
+                return Err(BufferPoolError::DiskWrite(format!(
+                    "Could not write page: {} to disk! Error: {}",
+                    page_to_flush_id, error
+                )));
+            }
+
+            // Let waiting threads know that processing is complete and remove the channel for this page ID...
+            let mut page_processing_guard = self.page_io_processing.lock().unwrap();
+            if let Some(tx) = page_processing_guard.remove(&page_to_flush_id) {
+                // Notify other threads that the page fetch is complete.
+                let _ = tx.send(frame_id);
+            }
+        }
+
+        // Acquire the write lock, contruct and return the page write guard with a reference to the frame.
+        let write_lock = free_frame.write_data();
+        Ok(PageWriteGuard::new(
+            self.evictor.as_ref(),
+            free_frame,
+            write_lock,
+        ))
+    }
 
     // /// Fetches a page and returns it, wrapped in a shared read lock guard that will unpin
     // /// the frame when it goes out of scope and is dropped.
@@ -298,34 +343,48 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    //     #[tokio::test]
-    //     async fn test_bpm_new_page_allocates_and_returns_write_guard() {
-    //         let dir = tempdir().unwrap();
-    //         let fs = Arc::new(TokioFileSystem::new());
-    //         let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+    #[tokio::test]
+    async fn test_bpm_create_page_allocates_and_returns_write_guard() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
 
-    //         let table_id = 100;
-    //         disk_manager
-    //             .create_table_file(table_id)
-    //             .await
-    //             .expect("Should create table file");
+        let table_id = 100;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
 
-    //         // Act 1: Initialize BPM with a pool capacity of 2
-    //         let bpm = BufferPoolManager::new(2, disk_manager);
+        // Act 1: Initialize BPM with a pool capacity of 2
+        let bpm = BufferPoolManager::new(2, disk_manager);
 
-    //         // Act 2: Request a brand new page
-    //         let mut page_guard = bpm
-    //             .create_page(table_id)
-    //             .await
-    //             .expect("Should return a new page write guard");
+        // Expected PageId for the first allocation
+        let expected_page_id = PageId {
+            table_id,
+            page_index: 0,
+        };
 
-    //         // Assert 1: Mutate the data to prove we have exclusive write access
-    //         page_guard[0] = 42;
-    //         page_guard[1] = 99;
+        // Act 2: Request a brand new page
+        let mut page_guard = bpm
+            .create_page(table_id)
+            .await
+            .expect("Should return a new page write guard");
 
-    //         // At this point, the page guard goes out of scope and drops,
-    //         // which should automatically unpin the frame!
-    //     }
+        // Assert 1: Mutate the data to prove we have exclusive write access
+        page_guard[0] = 42;
+        page_guard[1] = 99;
+        page_guard.mark_dirty();
+
+        // Assert 2: The frame must be safely in the page table and pinned!
+        assert_eq!(
+            Some(1),
+            bpm.get_pin_count(expected_page_id),
+            "The newly created page must be pinned in the page table"
+        );
+
+        // At this point, the page guard goes out of scope and drops,
+        // which should automatically unpin the frame!
+    }
 
     //     #[tokio::test]
     //     async fn test_bpm_fetch_page_cache_hit() {
