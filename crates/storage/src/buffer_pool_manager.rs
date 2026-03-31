@@ -54,6 +54,7 @@ impl BufferPoolManager {
             // TODO: Consider doing some better error handling here instead of returning a string.
             .map_err(|e| BufferPoolError::PageAllocation(e.to_string()))?;
 
+        // Lock the page table so we can find a frame, pin it, and insert the entry into the page table.
         let mut page_table_guard = self.page_table.lock().unwrap();
 
         // Placeholder for dirty page data if we need to flush an evicted page...
@@ -92,7 +93,6 @@ impl BufferPoolManager {
 
         // Add the page ID to the page table.
         page_table_guard.insert(page_id, frame_id);
-        // self.page_table.lock().unwrap().insert(page_id, frame_id);
 
         drop(page_table_guard);
 
@@ -339,7 +339,7 @@ impl BufferPoolManager {
 mod tests {
     use super::*;
     use crate::disk_manager::DiskManager;
-    use crate::file_system::TokioFileSystem;
+    use crate::file_system::{FileSystem, TokioFileSystem};
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -384,6 +384,218 @@ mod tests {
 
         // At this point, the page guard goes out of scope and drops,
         // which should automatically unpin the frame!
+    }
+
+    #[tokio::test]
+    async fn test_bpm_create_page_evicts_dirty_frame_and_flushes() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        // Clone the Arc to pass to DiskManager so we can still use `fs` at the end of the test
+        let disk_manager = Arc::new(DiskManager::new(
+            Arc::clone(&fs) as Arc<dyn FileSystem>,
+            dir.path().to_path_buf(),
+        ));
+
+        let table_id = 200;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
+
+        // Act 1: Initialize BPM with ONLY 1 frame
+        let bpm = BufferPoolManager::new(1, disk_manager);
+
+        let expected_page_id_0 = PageId {
+            table_id,
+            page_index: 0,
+        };
+        let expected_page_id_1 = PageId {
+            table_id,
+            page_index: 1,
+        };
+
+        // Setup: Create the first page, mutate it, and let it unpin
+        {
+            let mut guard1 = bpm
+                .create_page(table_id)
+                .await
+                .expect("Should create first page");
+            guard1[0] = 111;
+            guard1[PAGE_SIZE - 1] = 222;
+            guard1.mark_dirty();
+        } // guard1 drops here, unpinning frame 0
+
+        // Act 2: Create a NEW page. This forces the eviction and flush of page 0.
+        {
+            let _guard2 = bpm
+                .create_page(table_id)
+                .await
+                .expect("Should evict and create second page");
+
+            // Assert 1: Page 1 is pinned, Page 0 is gone from memory
+            assert_eq!(
+                Some(1),
+                bpm.get_pin_count(expected_page_id_1),
+                "Page 1 should be pinned"
+            );
+            assert_eq!(
+                None,
+                bpm.get_pin_count(expected_page_id_0),
+                "Page 0 should be evicted"
+            );
+        }
+
+        // Assert 2: Verify the dirty data was actually flushed to disk during eviction!
+        let path = dir.path().join(format!("{}.tbl", table_id));
+        let handle = fs.open_file(&path).await.expect("File should exist");
+        let mut buffer = [0u8; PAGE_SIZE];
+        handle
+            .read_at(&mut buffer, 0)
+            .await
+            .expect("Should read page 0 from disk");
+
+        assert_eq!(
+            111, buffer[0],
+            "First byte of evicted page should be flushed to disk"
+        );
+        assert_eq!(
+            222,
+            buffer[PAGE_SIZE - 1],
+            "Last byte of evicted page should be flushed to disk"
+        );
+    }
+
+    //     #[tokio::test]
+    //     async fn test_bpm_fetch_page_cache_hit() {
+    // ... hidden for brevity ...
+
+    #[test]
+    fn test_evict_page_returns_error_when_pool_full() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+
+        // Act 1: Initialize BPM with ONLY 1 frame
+        let bpm = BufferPoolManager::new(1, disk_manager);
+
+        // Act 2: Manually pin the only frame so the evictor has no eligible candidates
+        bpm.pin_frame(0);
+
+        // Act 3: Attempt to evict a page
+        let result = {
+            let mut page_table_guard = bpm.page_table.lock().unwrap();
+            bpm.evict_page(&mut page_table_guard)
+        };
+
+        // Assert: It MUST gracefully return an error
+        assert!(
+            matches!(result, Err(BufferPoolError::BufferFull)),
+            "evict_page should return BufferFull when the evictor has no victims"
+        );
+    }
+
+    #[test]
+    fn test_evict_page_evicts_clean_page_and_updates_page_table() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+
+        // Initialize BPM with 1 frame
+        let bpm = BufferPoolManager::new(1, disk_manager);
+        let page_id = PageId {
+            table_id: 10,
+            page_index: 0,
+        };
+
+        // Setup: Empty the free list and manually simulate a clean cached page in frame 0
+        bpm.free_frames.lock().unwrap().clear();
+        bpm.frames[0].set_page_id(Some(page_id));
+        bpm.frames[0].set_dirty(false);
+        bpm.page_table.lock().unwrap().insert(page_id, 0);
+
+        // Tell the evictor this frame is eligible for eviction
+        bpm.evictor.add(0);
+
+        // Act: Evict the page
+        let result = {
+            let mut page_table_guard = bpm.page_table.lock().unwrap();
+            bpm.evict_page(&mut page_table_guard)
+        };
+
+        // Assert 1: It should succeed, return frame 0, and return None for the dirty data
+        assert!(
+            matches!(result, Ok((0, None))),
+            "evict_page should return Ok((0, None)) when a clean page is evicted"
+        );
+
+        // Assert 2: The evicted page MUST be removed from the page_table
+        assert_eq!(
+            None,
+            bpm.get_pin_count(page_id),
+            "evict_page must remove the victim's page_id from the page_table"
+        );
+
+        // Assert 3: The frame must be pinned by evict_page so the evictor doesn't give it out again
+        assert_eq!(
+            1,
+            bpm.frames[0].get_pin_count(),
+            "evict_page must pin the frame before returning it"
+        );
+    }
+
+    #[test]
+    fn test_evict_page_evicts_dirty_page_and_returns_data_to_flush() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+
+        // Initialize BPM with 1 frame
+        let bpm = BufferPoolManager::new(1, disk_manager);
+        let page_id = PageId {
+            table_id: 20,
+            page_index: 1,
+        };
+
+        // Setup: Manually simulate a DIRTY cached page in frame 0
+        bpm.free_frames.lock().unwrap().clear();
+        bpm.frames[0].set_page_id(Some(page_id));
+        bpm.frames[0].set_dirty(true); // MARK DIRTY
+        bpm.page_table.lock().unwrap().insert(page_id, 0);
+
+        // Write some recognizable magic bytes to the frame's buffer
+        {
+            let mut write_guard = bpm.frames[0].write_data();
+            write_guard[0] = 123;
+            write_guard[PAGE_SIZE - 1] = 234;
+        }
+
+        bpm.evictor.add(0);
+
+        // Act: Evict the page
+        let result = {
+            let mut page_table_guard = bpm.page_table.lock().unwrap();
+            bpm.evict_page(&mut page_table_guard)
+        };
+
+        // Assert 1: It should succeed and return Some(...) for the dirty data
+        let (frame_id, dirty_payload_opt) = result.expect("Should successfully evict");
+        assert_eq!(0, frame_id);
+
+        let (evicted_page_id, dirty_data) =
+            dirty_payload_opt.expect("Dirty page must return data to flush");
+
+        // Assert 2: It returned the correct PageId and the exact copied bytes!
+        assert_eq!(page_id, evicted_page_id);
+        assert_eq!(123, dirty_data[0]);
+        assert_eq!(234, dirty_data[PAGE_SIZE - 1]);
+
+        // Assert 3: Verification of state transitions
+        assert_eq!(
+            None,
+            bpm.get_pin_count(page_id),
+            "Must remove from page table"
+        );
+        assert_eq!(1, bpm.frames[0].get_pin_count(), "Must pin the frame");
     }
 
     //     #[tokio::test]
@@ -795,133 +1007,4 @@ mod tests {
     //             "The newly created page should have index 1"
     //         );
     //     }
-
-    #[test] // Notice this doesn't even need tokio::test anymore since evict_page is sync!
-    fn test_evict_page_returns_error_when_pool_full() {
-        let dir = tempdir().unwrap();
-        let fs = Arc::new(TokioFileSystem::new());
-        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
-
-        // Act 1: Initialize BPM with ONLY 1 frame
-        let bpm = BufferPoolManager::new(1, disk_manager);
-
-        // Act 2: Manually pin the only frame so the evictor has no eligible candidates
-        bpm.pin_frame(0);
-
-        // Act 3: Attempt to evict a page
-        let result = {
-            let mut page_table_guard = bpm.page_table.lock().unwrap();
-            bpm.evict_page(&mut page_table_guard)
-        };
-
-        // Assert: It MUST gracefully return an error
-        assert!(
-            matches!(result, Err(BufferPoolError::BufferFull)),
-            "evict_page should return BufferFull when the evictor has no victims"
-        );
-    }
-
-    #[test]
-    fn test_evict_page_evicts_clean_page_and_updates_page_table() {
-        let dir = tempdir().unwrap();
-        let fs = Arc::new(TokioFileSystem::new());
-        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
-
-        // Initialize BPM with 1 frame
-        let bpm = BufferPoolManager::new(1, disk_manager);
-        let page_id = PageId {
-            table_id: 10,
-            page_index: 0,
-        };
-
-        // Setup: Empty the free list and manually simulate a clean cached page in frame 0
-        bpm.free_frames.lock().unwrap().clear();
-        bpm.frames[0].set_page_id(Some(page_id));
-        bpm.frames[0].set_dirty(false);
-        bpm.page_table.lock().unwrap().insert(page_id, 0);
-
-        // Tell the evictor this frame is eligible for eviction
-        bpm.evictor.add(0);
-
-        // Act: Evict the page
-        let result = {
-            let mut page_table_guard = bpm.page_table.lock().unwrap();
-            bpm.evict_page(&mut page_table_guard)
-        };
-
-        // Assert 1: It should succeed, return frame 0, and return None for the dirty data
-        assert!(
-            matches!(result, Ok((0, None))),
-            "evict_page should return Ok((0, None)) when a clean page is evicted"
-        );
-
-        // Assert 2: The evicted page MUST be removed from the page_table
-        assert_eq!(
-            None,
-            bpm.get_pin_count(page_id),
-            "evict_page must remove the victim's page_id from the page_table"
-        );
-
-        // Assert 3: The frame must be pinned by evict_page so the evictor doesn't give it out again
-        assert_eq!(
-            1,
-            bpm.frames[0].get_pin_count(),
-            "evict_page must pin the frame before returning it"
-        );
-    }
-
-    #[test]
-    fn test_evict_page_evicts_dirty_page_and_returns_data_to_flush() {
-        let dir = tempdir().unwrap();
-        let fs = Arc::new(TokioFileSystem::new());
-        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
-
-        // Initialize BPM with 1 frame
-        let bpm = BufferPoolManager::new(1, disk_manager);
-        let page_id = PageId {
-            table_id: 20,
-            page_index: 1,
-        };
-
-        // Setup: Manually simulate a DIRTY cached page in frame 0
-        bpm.free_frames.lock().unwrap().clear();
-        bpm.frames[0].set_page_id(Some(page_id));
-        bpm.frames[0].set_dirty(true); // MARK DIRTY
-        bpm.page_table.lock().unwrap().insert(page_id, 0);
-
-        // Write some recognizable magic bytes to the frame's buffer
-        {
-            let mut write_guard = bpm.frames[0].write_data();
-            write_guard[0] = 123;
-            write_guard[PAGE_SIZE - 1] = 234;
-        }
-
-        bpm.evictor.add(0);
-
-        // Act: Evict the page
-        let result = {
-            let mut page_table_guard = bpm.page_table.lock().unwrap();
-            bpm.evict_page(&mut page_table_guard)
-        };
-
-        // Assert 1: It should succeed and return Some(...) for the dirty data
-        let (frame_id, dirty_payload_opt) = result.expect("Should successfully evict");
-        assert_eq!(0, frame_id);
-
-        let (evicted_page_id, dirty_data) =
-            dirty_payload_opt.expect("Dirty page must return data to flush");
-
-        // Assert 2: It returned the correct PageId and the exact copied bytes!
-        assert_eq!(page_id, evicted_page_id);
-        assert_eq!(123, dirty_data[0]);
-        assert_eq!(234, dirty_data[PAGE_SIZE - 1]);
-
-        // Assert 3: Verification of state transitions
-        assert_eq!(
-            None,
-            bpm.get_pin_count(page_id),
-            "Must remove from page table"
-        );
-        assert_eq!(1, bpm.frames[0].get_pin_count(), "Must pin the frame");
-    }
 }
