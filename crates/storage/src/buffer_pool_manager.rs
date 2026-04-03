@@ -22,7 +22,7 @@ pub struct BufferPoolManager {
     /// allows other threads that are accessing a page to subcribe to an in-
     /// flight request for the page and sleep until the disk read is complete
     /// and the page is cached.
-    page_io_processing: Mutex<HashMap<PageId, broadcast::Sender<usize>>>,
+    page_io_processing: Mutex<HashMap<PageId, broadcast::Sender<Result<(), String>>>>,
     /// Map of currently cached pages to the frame ID that holds them.
     page_table: Mutex<HashMap<PageId, usize>>,
 }
@@ -77,7 +77,7 @@ impl BufferPoolManager {
             // and we need to add a processing channel to notify other threads that this page is getting flushed.
             if self.frames[free_frame_id].is_dirty() {
                 // Create a channel to notify other threads that this page is processing...
-                let (tx, _rx) = broadcast::channel::<usize>(1);
+                let (tx, _rx) = broadcast::channel::<Result<(), String>>(1);
                 page_processing_guard.insert(page_id, tx.clone());
                 // Now that we have our broadcast channel set up we can drop our mutexes and allow other threads to
                 // check if this page is being processed...
@@ -113,7 +113,7 @@ impl BufferPoolManager {
             let mut page_processing_guard = self.page_io_processing.lock().unwrap();
             if let Some(tx) = page_processing_guard.remove(&page_to_flush_id) {
                 // Notify other threads that the page fetch is complete.
-                let _ = tx.send(frame_id);
+                let _ = tx.send(Ok(()));
             }
         }
 
@@ -128,41 +128,88 @@ impl BufferPoolManager {
 
     // /// Fetches a page and returns it, wrapped in a shared read lock guard that will unpin
     // /// the frame when it goes out of scope and is dropped.
-    // pub async fn fetch_page_read(
-    //     &self,
-    //     page_id: PageId,
-    // ) -> Result<PageReadGuard<'_>, BufferPoolError> {
-    //     // Call the private helper to return a pinned frame containing the page data.
-    //     if let Ok(frame) = self.fetch_and_pin_frame(page_id).await {
-    //         let read_lock = frame.read_data();
-    //         Ok(PageReadGuard::new(self.evictor.as_ref(), frame, read_lock))
-    //     } else {
-    //         return Err(BufferPoolError::BufferFull);
-    //     }
-    // }
+    pub async fn fetch_page_read(
+        &self,
+        page_id: PageId,
+    ) -> Result<PageReadGuard<'_>, BufferPoolError> {
+        // Call the private helper to return a pinned frame containing the page data.
+        if let Ok(frame) = self.fetch_and_pin_frame(page_id).await {
+            let read_lock = frame.read_data();
+            Ok(PageReadGuard::new(self.evictor.as_ref(), frame, read_lock))
+        } else {
+            return Err(BufferPoolError::BufferFull);
+        }
+    }
 
     // /// Fetches a page and returns it, wrapped in an exclusive write lock guard that will unpin
     // /// the frame when it goes out of scope and is dropped.
-    // pub async fn fetch_page_write(
-    //     &self,
-    //     page_id: PageId,
-    // ) -> Result<PageWriteGuard<'_>, BufferPoolError> {
-    //     // Call the private helper to return a pinned frame containing the page data.
-    //     if let Ok(frame) = self.fetch_and_pin_frame(page_id).await {
-    //         let write_lock = frame.write_data();
-    //         Ok(PageWriteGuard::new(
-    //             self.evictor.as_ref(),
-    //             frame,
-    //             write_lock,
-    //         ))
-    //     } else {
-    //         return Err(BufferPoolError::BufferFull);
-    //     }
-    // }
+    pub async fn fetch_page_write(
+        &self,
+        page_id: PageId,
+    ) -> Result<PageWriteGuard<'_>, BufferPoolError> {
+        // Call the private helper to return a pinned frame containing the page data.
+        if let Ok(frame) = self.fetch_and_pin_frame(page_id).await {
+            let write_lock = frame.write_data();
+            Ok(PageWriteGuard::new(
+                self.evictor.as_ref(),
+                frame,
+                write_lock,
+            ))
+        } else {
+            return Err(BufferPoolError::BufferFull);
+        }
+    }
 
-    // /// Attempts to find the page in the cache. Upon a cache miss, if a free frame is available, the
-    // /// page is read from disk and loaded into the free frame. If no free frames are available, the
-    // /// evictor is called to evict a page from the cache to free up a frame.
+    /// Attempts to find the page in the cache. Upon a cache miss, if a free frame is available, the
+    /// page is read from disk and loaded into the free frame. If no free frames are available, the
+    /// evictor is called to evict a page from the cache to free up a frame.
+    async fn fetch_and_pin_frame(&self, page_id: PageId) -> Result<&Frame, BufferPoolError> {
+        // Lock the page table to prepare to insert a new entry...
+        let mut page_table_guard = self.page_table.lock().unwrap();
+
+        // Check the cache...
+        if let Some(&frame_id) = page_table_guard.get(&page_id) {
+            self.pin_frame(frame_id);
+            return Ok(&self.frames[frame_id]);
+        }
+
+        // Pull a free frame ID from the free frames collection...
+        if let Some(free_frame_id) = self.free_frames.lock().unwrap().pop() {
+            // While the locks are held, insert the new entry into the page table...
+            page_table_guard.insert(page_id, free_frame_id);
+            // ...and pin the frame.
+            self.pin_frame(free_frame_id);
+
+            // Notify other threads that this page is processing...
+            let mut io_processing_guard = self.page_io_processing.lock().unwrap();
+            let (tx, _rx) = broadcast::channel::<Result<(), String>>(1);
+            io_processing_guard.insert(page_id, tx.clone());
+
+            // Mutexes cannot be held across async/await boundaries. Drop the locks so we can load from disk asynchronously.
+            drop(page_table_guard);
+            drop(io_processing_guard);
+
+            // Load the page from disk...
+            let mut write_guard = self.frames[free_frame_id].write_data();
+            self.disk_manager
+                .read_page(page_id, &mut write_guard)
+                .await
+                .map_err(|e| {
+                    BufferPoolError::DiskRead(format!(
+                        "Error reading page {} from disk: {}",
+                        page_id, e
+                    ))
+                })?;
+
+            return Ok(&self.frames[free_frame_id]);
+        } else {
+            Err(BufferPoolError::BufferFull)
+        }
+    }
+
+    /// Attempts to find the page in the cache. Upon a cache miss, if a free frame is available, the
+    /// page is read from disk and loaded into the free frame. If no free frames are available, the
+    /// evictor is called to evict a page from the cache to free up a frame.
     // async fn fetch_and_pin_frame(&self, page_id: PageId) -> Result<&Frame, BufferPoolError> {
     //     // Check the page table to see if the page is cached...
     //     // Only hold the lock long enough to fetch the frame ID and pin it...
@@ -596,6 +643,67 @@ mod tests {
             "Must remove from page table"
         );
         assert_eq!(1, bpm.frames[0].get_pin_count(), "Must pin the frame");
+    }
+
+    #[tokio::test]
+    async fn test_bpm_fetch_page_miss_loads_from_disk_then_hit_returns_cached_frame() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(
+            Arc::clone(&fs) as Arc<dyn FileSystem>,
+            dir.path().to_path_buf(),
+        ));
+
+        let table_id = 300;
+        disk_manager.create_table_file(table_id).await.unwrap();
+
+        // Setup: Bypass the BPM to write directly to disk, simulating an existing populated database.
+        let page_id = disk_manager.allocate_page(table_id).await.unwrap();
+        let mut initial_data = [0u8; PAGE_SIZE];
+        initial_data[0] = 77;
+        initial_data[PAGE_SIZE - 1] = 88;
+        disk_manager
+            .write_page(page_id, &initial_data)
+            .await
+            .unwrap();
+
+        // Act 1: Initialize BPM (0 pages cached)
+        let bpm = BufferPoolManager::new(2, disk_manager);
+
+        // Act 2: Fetch the page (Should trigger a Cache Miss and load from disk)
+        let guard1 = bpm
+            .fetch_page_read(page_id)
+            .await
+            .expect("Should fetch page from disk");
+
+        // Assert 1: Verify it correctly read the data from disk
+        assert_eq!(77, guard1[0], "First byte should match disk");
+        assert_eq!(88, guard1[PAGE_SIZE - 1], "Last byte should match disk");
+
+        // Assert 2: Verify it is in the page table with pin count = 1
+        assert_eq!(
+            Some(1),
+            bpm.get_pin_count(page_id),
+            "Frame should be pinned once"
+        );
+
+        // Act 3: Fetch the SAME page again (Should trigger a Cache Hit)
+        let _guard2 = bpm
+            .fetch_page_read(page_id)
+            .await
+            .expect("Should hit cache");
+
+        // Assert 3: Verify it did not allocate a new frame, but incremented the pin count of the existing one!
+        assert_eq!(
+            Some(2),
+            bpm.get_pin_count(page_id),
+            "Cache hit should increment pin count to 2"
+        );
+        assert_eq!(
+            1,
+            bpm.get_free_frame_count(),
+            "Should only have consumed 1 free frame total"
+        );
     }
 
     //     #[tokio::test]
