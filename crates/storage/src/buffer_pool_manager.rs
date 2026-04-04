@@ -832,47 +832,47 @@ mod tests {
     //         assert_eq!(44, read_guard[1]);
     //     }
 
-    //     #[tokio::test]
-    //     async fn test_bpm_fetch_page_cache_miss_with_free_frame() {
-    //         let dir = tempdir().unwrap();
-    //         let fs = Arc::new(TokioFileSystem::new());
-    //         let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+    #[tokio::test]
+    async fn test_bpm_fetch_page_cache_miss_with_free_frame() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
 
-    //         let table_id = 400;
-    //         disk_manager
-    //             .create_table_file(table_id)
-    //             .await
-    //             .expect("Should create table file");
+        let table_id = 400;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
 
-    //         // Setup: Pre-allocate and write a page directly to disk using DiskManager
-    //         // This simulates a page that exists in the database but is currently NOT in the Buffer Pool
-    //         let page_id = disk_manager
-    //             .allocate_page(table_id)
-    //             .await
-    //             .expect("Should allocate page");
-    //         let mut disk_buffer = [0u8; crate::page_id::PAGE_SIZE];
-    //         disk_buffer[0] = 77;
-    //         disk_buffer[1] = 88;
+        // Setup: Pre-allocate and write a page directly to disk using DiskManager
+        // This simulates a page that exists in the database but is currently NOT in the Buffer Pool
+        let page_id = disk_manager
+            .allocate_page(table_id)
+            .await
+            .expect("Should allocate page");
+        let mut disk_buffer = [0u8; crate::page_id::PAGE_SIZE];
+        disk_buffer[0] = 77;
+        disk_buffer[1] = 88;
 
-    //         disk_manager
-    //             .write_page(page_id, &disk_buffer)
-    //             .await
-    //             .expect("Should write page directly to disk");
+        disk_manager
+            .write_page(page_id, &disk_buffer)
+            .await
+            .expect("Should write page directly to disk");
 
-    //         // Act 1: Initialize BPM
-    //         let bpm = BufferPoolManager::new(2, disk_manager);
+        // Act 1: Initialize BPM
+        let bpm = BufferPoolManager::new(2, disk_manager);
 
-    //         // Act 2: Fetch the page for reading.
-    //         // It is NOT in the page table, so it must trigger a cache miss, pop a free frame, and read from disk.
-    //         let read_guard = bpm
-    //             .fetch_page_read(page_id)
-    //             .await
-    //             .expect("Should fetch page from disk on cache miss");
+        // Act 2: Fetch the page for reading.
+        // It is NOT in the page table, so it must trigger a cache miss, pop a free frame, and read from disk.
+        let read_guard = bpm
+            .fetch_page_read(page_id)
+            .await
+            .expect("Should fetch page from disk on cache miss");
 
-    //         // Assert: The data should perfectly match what we wrote to disk
-    //         assert_eq!(77, read_guard[0]);
-    //         assert_eq!(88, read_guard[1]);
-    //     }
+        // Assert: The data should perfectly match what we wrote to disk
+        assert_eq!(77, read_guard[0]);
+        assert_eq!(88, read_guard[1]);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_bpm_concurrent_cache_miss_prevents_phantom_fetch() {
