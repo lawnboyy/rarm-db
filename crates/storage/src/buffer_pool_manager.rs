@@ -1141,38 +1141,38 @@ mod tests {
     //         );
     //     }
 
-    //     #[tokio::test]
-    //     async fn test_bpm_fetch_page_returns_error_when_all_frames_pinned() {
-    //         let dir = tempdir().unwrap();
-    //         let fs = Arc::new(TokioFileSystem::new());
-    //         let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+    #[tokio::test]
+    async fn test_bpm_fetch_page_returns_error_when_all_frames_pinned() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
 
-    //         let table_id = 800;
-    //         disk_manager
-    //             .create_table_file(table_id)
-    //             .await
-    //             .expect("Should create table file");
+        let table_id = 800;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
 
-    //         let page_id_1 = disk_manager.allocate_page(table_id).await.unwrap();
-    //         let page_id_2 = disk_manager.allocate_page(table_id).await.unwrap();
+        let page_id_1 = disk_manager.allocate_page(table_id).await.unwrap();
+        let page_id_2 = disk_manager.allocate_page(table_id).await.unwrap();
 
-    //         // Act 1: Initialize BPM with ONLY 1 frame
-    //         let bpm = BufferPoolManager::new(1, disk_manager);
+        // Act 1: Initialize BPM with ONLY 1 frame
+        let bpm = BufferPoolManager::new(1, disk_manager);
 
-    //         // Act 2: Fetch Page 1 and HOLD the guard.
-    //         // Frame 0 now has a pin_count of 1 and is removed from the evictor.
-    //         let _guard1 = bpm.fetch_page_read(page_id_1).await.unwrap();
+        // Act 2: Fetch Page 1 and HOLD the guard.
+        // Frame 0 now has a pin_count of 1 and is removed from the evictor.
+        let _guard1 = bpm.fetch_page_read(page_id_1).await.unwrap();
 
-    //         // Act 3: Attempt to fetch Page 2.
-    //         // The pool is full, and the evictor has 0 eligible victims.
-    //         // This MUST gracefully return an error (or None), not panic or deadlock!
-    //         let result = bpm.fetch_page_read(page_id_2).await;
+        // Act 3: Attempt to fetch Page 2.
+        // The pool is full, and the evictor has 0 eligible victims.
+        // This MUST gracefully return an error (or None), not panic or deadlock!
+        let result = bpm.fetch_page_read(page_id_2).await;
 
-    //         assert!(
-    //             result.is_err(),
-    //             "BPM should return an error when no frames are available for eviction"
-    //         );
-    //     }
+        assert!(
+            result.is_err(),
+            "BPM should return an error when no frames are available for eviction"
+        );
+    }
 
     //     #[tokio::test]
     //     async fn test_bpm_create_page_evicts_frame_when_full() {
