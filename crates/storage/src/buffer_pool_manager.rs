@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use tokio::sync::broadcast;
+use tokio::{sync::broadcast};
 
 use crate::{
     BufferPoolError, DiskManager, Evictor, Frame, PageId, PageReadGuard, evictor::ClockEvictor,
@@ -70,6 +70,7 @@ impl BufferPoolManager {
             // This method pins the frame.
             let evicted_page_data = self.evict_page(&mut page_table_guard).unwrap();
             let free_frame_id = evicted_page_data.0;
+            self.pin_frame(free_frame_id);
             page_data = evicted_page_data.1;
 
             // If the evicted page was dirty, we need to flush it to disk before we release the page_table lock,
@@ -198,13 +199,14 @@ impl BufferPoolManager {
             return Ok(&self.frames[frame_id]);
         }
 
+        let mut page_data_to_flush: Option<(PageId, [u8; 8192])> = None;
         let available_frame_id = {
             if let Some(free_frame_id) = self.free_frames.lock().unwrap().pop() {
                 Some(free_frame_id)
             } else {
                 // Evict
                 if let Ok((evicted_frame_id, page_data)) = self.evict_page(&mut page_table_guard) {
-                    // TODO: If the page is dirty, capture the data and flush to disk outside of all held locks.
+                    page_data_to_flush = page_data;
                     // Otherwise, set the return the frame...                
                     Some(evicted_frame_id)
                     // Page table lock is dropped here.
@@ -266,126 +268,29 @@ impl BufferPoolManager {
             // Notify other threads that the page fetch is complete.
             let _ = sender.send(Ok(()));
         }
+        // Drop the IO processing lock before flushing to disk...
+        drop(io_processing_guard);
+
+        // Finally, if the was dirty, flush to disk
+        if let Some(page_to_flush) = page_data_to_flush {
+            let (page_to_flush_id, page_data) = page_to_flush;
+            let result = self
+                .disk_manager
+                .write_page(page_to_flush_id, &page_data)
+                .await;
+            if let Err(error) = result {
+                return Err(BufferPoolError::DiskWrite(format!(
+                    "Could not write page: {} to disk! Error: {}",
+                    page_to_flush_id, error
+                )));
+            }
+        }
+
+        self.frames[frame_id].set_dirty(false);
 
         Ok(&self.frames[frame_id])
         
     }
-
-    /// Attempts to find the page in the cache. Upon a cache miss, if a free frame is available, the
-    /// page is read from disk and loaded into the free frame. If no free frames are available, the
-    /// evictor is called to evict a page from the cache to free up a frame.
-    // async fn fetch_and_pin_frame(&self, page_id: PageId) -> Result<&Frame, BufferPoolError> {
-    //     // Check the page table to see if the page is cached...
-    //     // Only hold the lock long enough to fetch the frame ID and pin it...
-    //     let cached_frame_id = {
-    //         let page_table_guard = self.page_table.lock().unwrap();
-    //         // We make a copy of the frame ID because the page table HashMap will return a reference to
-    //         // the frame ID value in memory which can't be guaranteed to be valid after the lock is released
-    //         // at the end of this scope. We'll need to reference the frame ID outside the scope below if we
-    //         // found a cached frame, hence the copy.
-
-    //         // Note: The syntax here is confusing, but the Some(&frame_id) is not borrowing a reference to
-    //         // the frame_id like it would if we were on the right side of the expression. Instead it is a
-    //         // short hand pattern to deference the pointer and copy the underlying value into our frame_id
-    //         // variable.
-    //         if let Some(&frame_id) = page_table_guard.get(&page_id) {
-    //             // We must pin the frame inside the lock to guarantee that it will not be evicted by another
-    //             // thread prior to the current read completing.
-    //             self.pin_frame(frame_id);
-    //             Some(frame_id)
-    //         } else {
-    //             None
-    //         }
-    //     };
-
-    //     // See if the paged is cached...
-    //     if let Some(frame_id) = cached_frame_id {
-    //         // The page is cached, so we can return it.
-    //         let frame = &self.frames[frame_id];
-    //         Ok(frame)
-    //     } else {
-    //         // The page is not cached...
-    //         // Check if there is an in-flight request for this page ID...
-    //         let mut in_flight_guard = self.in_flight_fetches.lock().unwrap();
-    //         let in_flight_result = in_flight_guard.get(&page_id);
-
-    //         if let Some(in_flight_channel) = in_flight_result {
-    //             // There is an in-flight request for the page, so we will subscribe to the channel and
-    //             // wait for it to complete.
-    //             let mut receiver = in_flight_channel.subscribe();
-    //             // Drop our mutex on the in flight map so others can access it.
-    //             drop(in_flight_guard);
-    //             // Wait for the in-flight page request to complete.
-    //             let frame_id = receiver.recv().await.map_err(|e| {
-    //                 BufferPoolError::InFlightBroadcast(format!(
-    //                     "Error waiting on in flight fetch for page {}: {}",
-    //                     page_id, e
-    //                 ))
-    //             })?;
-    //             // The in flight request of the page is complete, so the frame should contain the requested page
-    //             // data. Now we pin it and return.
-    //             self.pin_frame(frame_id);
-    //             return Ok(&self.frames[frame_id]);
-    //         } else {
-    //             // There was no in flight request, and we still hold the mutex for the in flight fetches map. So
-    //             // this thread is the leader and will need to create the broadcast channel for other threads to
-    //             // subscribe to, then fetch the page from disk and load it into a frame in the cache.
-    //             let (tx, _rx) = broadcast::channel::<usize>(1);
-    //             in_flight_guard.insert(page_id, tx.clone());
-    //             // Now that we have our broadcast channel set up we can drop our mutexes and allow other threads to
-    //             // check for in flight fetches.
-    //             drop(in_flight_guard);
-    //             // Handle a cache miss by loading the page from disk.
-    //             // First check if we have any free frames...
-    //             let frame_id = {
-    //                 // Acquire the lock on the free_frames vector.
-    //                 // Make sure we only hold the lock for the 'if' block because the 'else' block contains an 'await'
-    //                 // call and we cannot hold the lock across an await boundary.
-    //                 if let Some(free_frame_id) = self.free_frames.lock().unwrap().pop() {
-    //                     // Pin the frame inside the lock so we prevent eviction.
-    //                     self.pin_frame(free_frame_id);
-    //                     free_frame_id
-    //                 } else {
-    //                     // If no free frames are available, then attempt to evict a page.
-    //                     self.evict_page().await?
-    //                 }
-    //             };
-
-    //             // If we reach this point, we have a free frame available, either one that's never been used
-    //             // or one returned as a result of an eviction.
-    //             let frame = &self.frames[frame_id];
-    //             // Load the page from disk into the frame.
-    //             let mut write_guard = self.frames[frame_id].write_data();
-    //             self.disk_manager
-    //                 .read_page(page_id, &mut write_guard)
-    //                 .await
-    //                 .map_err(|e| {
-    //                     BufferPoolError::DiskRead(format!(
-    //                         "Error reading page {} from disk: {}",
-    //                         page_id, e
-    //                     ))
-    //                 })?;
-    //             // The leader is done loading in the page, so now it needs to broadcast a message to any other threads that
-    //             // are waiting on this page to be cached.
-    //             // Acquire the locks
-    //             let mut page_table_guard = self.page_table.lock().unwrap();
-    //             let mut in_flight_fetches_guard = self.in_flight_fetches.lock().unwrap();
-    //             // We've already pinned the frame in the free frames mutex above, so we don't need to pin it again...
-    //             // We do need to set the page ID
-    //             self.frames[frame_id].set_page_id(Some(page_id));
-    //             // Update the page table with the newly cached page...
-    //             page_table_guard.insert(page_id, frame_id);
-
-    //             // Remove the page ID from the in flight fetches map and get the transmitter...
-    //             if let Some(tx) = in_flight_fetches_guard.remove(&page_id) {
-    //                 // Notify other threads that the page fetch is complete.
-    //                 let _ = tx.send(frame_id);
-    //             }
-
-    //             Ok(frame)
-    //         }
-    //     }
-    // }
 
     fn evict_page(
         &self,
@@ -396,8 +301,9 @@ impl BufferPoolManager {
             // Now that we have a victim we can remove it from the page table...
             page_table_guard.remove(&victim_page_id);
 
+            // TODO: Should we rely on the caller to pin the frame?
             // Pin the frame while we have the lock.
-            self.pin_frame(free_frame_id);
+            // self.pin_frame(free_frame_id);
 
             // Return the page ID and a copy of the data if the page is dirty...
             if self.frames[free_frame_id].is_dirty() {
@@ -643,11 +549,11 @@ mod tests {
         );
 
         // Assert 3: The frame must be pinned by evict_page so the evictor doesn't give it out again
-        assert_eq!(
-            1,
-            bpm.frames[0].get_pin_count(),
-            "evict_page must pin the frame before returning it"
-        );
+        // assert_eq!(
+        //     1,
+        //     bpm.frames[0].get_pin_count(),
+        //     "evict_page must pin the frame before returning it"
+        // );
     }
 
     #[test]
@@ -702,7 +608,7 @@ mod tests {
             bpm.get_pin_count(page_id),
             "Must remove from page table"
         );
-        assert_eq!(1, bpm.frames[0].get_pin_count(), "Must pin the frame");
+        // assert_eq!(1, bpm.frames[0].get_pin_count(), "Must pin the frame");
     }
 
     #[tokio::test]
@@ -766,8 +672,8 @@ mod tests {
         );
     }
 
-        #[tokio::test]
-        async fn test_bpm_fetch_page_cache_hit() {
+    #[tokio::test]
+    async fn test_bpm_fetch_page_cache_hit() {
             let dir = tempdir().unwrap();
             let fs = Arc::new(TokioFileSystem::new());
             let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
@@ -1079,67 +985,67 @@ mod tests {
         );
     }
 
-    //     #[tokio::test]
-    //     async fn test_bpm_evicts_dirty_frame_and_writes_to_disk() {
-    //         let dir = tempdir().unwrap();
-    //         let fs = Arc::new(TokioFileSystem::new());
-    //         let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+    #[tokio::test]
+    async fn test_bpm_evicts_dirty_frame_and_writes_to_disk() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
 
-    //         let table_id = 700;
-    //         disk_manager
-    //             .create_table_file(table_id)
-    //             .await
-    //             .expect("Should create table file");
+        let table_id = 700;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
 
-    //         // Setup: Pre-allocate 2 pages directly on disk
-    //         let page_id_1 = disk_manager.allocate_page(table_id).await.unwrap();
-    //         let page_id_2 = disk_manager.allocate_page(table_id).await.unwrap();
+        // Setup: Pre-allocate 2 pages directly on disk
+        let page_id_1 = disk_manager.allocate_page(table_id).await.unwrap();
+        let page_id_2 = disk_manager.allocate_page(table_id).await.unwrap();
 
-    //         // Act 1: Initialize BPM with ONLY 1 frame to force immediate evictions
-    //         let bpm = BufferPoolManager::new(1, disk_manager);
+        // Act 1: Initialize BPM with ONLY 1 frame to force immediate evictions
+        let bpm = BufferPoolManager::new(1, disk_manager);
 
-    //         // Act 2: Fetch Page 1, modify it, and mark it DIRTY
-    //         {
-    //             let mut guard1 = bpm.fetch_page_write(page_id_1).await.unwrap();
+        // Act 2: Fetch Page 1, modify it, and mark it DIRTY
+        {
+            let mut guard1 = bpm.fetch_page_write(page_id_1).await.unwrap();
 
-    //             // Write some recognizable magic bytes
-    //             guard1[0] = 123;
-    //             guard1[1] = 234;
+            // Write some recognizable magic bytes
+            guard1[0] = 123;
+            guard1[1] = 234;
 
-    //             // CRITICAL: We tell the guard that this page has been modified
-    //             guard1.mark_dirty();
-    //         }
-    //         // guard1 drops here.
-    //         // The pin count for Frame 0 drops to 0, and the evictor is notified via `evictor.add()`.
+            // CRITICAL: We tell the guard that this page has been modified
+            guard1.mark_dirty();
+        }
+        // guard1 drops here.
+        // The pin count for Frame 0 drops to 0, and the evictor is notified via `evictor.add()`.
 
-    //         // Act 3: Fetch Page 2.
-    //         // We only have 1 frame, so this forces a cache miss. The BPM MUST consult the evictor,
-    //         // select Frame 0 as the victim, and recognize that Frame 0 is dirty.
-    //         // It MUST write Page 1 to disk before loading Page 2!
-    //         {
-    //             let guard2 = bpm.fetch_page_read(page_id_2).await.unwrap();
+        // Act 3: Fetch Page 2.
+        // We only have 1 frame, so this forces a cache miss. The BPM MUST consult the evictor,
+        // select Frame 0 as the victim, and recognize that Frame 0 is dirty.
+        // It MUST write Page 1 to disk before loading Page 2!
+        {
+            let guard2 = bpm.fetch_page_read(page_id_2).await.unwrap();
 
-    //             // Just verifying we got Page 2 successfully (it should be empty/zeroed out)
-    //             assert_eq!(0, guard2[0], "Page 2 should be empty/zeroed");
-    //         }
-    //         // guard2 drops here. Frame 0 is now unpinned again, holding Page 2.
+            // Just verifying we got Page 2 successfully (it should be empty/zeroed out)
+            assert_eq!(0, guard2[0], "Page 2 should be empty/zeroed");
+        }
+        // guard2 drops here. Frame 0 is now unpinned again, holding Page 2.
 
-    //         // Act 4: Fetch Page 1 AGAIN.
-    //         // This forces another cache miss, evicting Page 2, and reading Page 1 back from disk.
-    //         let guard1_reloaded = bpm.fetch_page_read(page_id_1).await.unwrap();
+        // Act 4: Fetch Page 1 AGAIN.
+        // This forces another cache miss, evicting Page 2, and reading Page 1 back from disk.
+        let guard1_reloaded = bpm.fetch_page_read(page_id_1).await.unwrap();
 
-    //         // Assert: The Phantom Data Check!
-    //         // If the BPM didn't flush the dirty page to disk during Act 3,
-    //         // it will just read the original, empty page from disk, and these assertions will fail!
-    //         assert_eq!(
-    //             123, guard1_reloaded[0],
-    //             "Dirty page was not flushed to disk before eviction!"
-    //         );
-    //         assert_eq!(
-    //             234, guard1_reloaded[1],
-    //             "Dirty page was not flushed to disk before eviction!"
-    //         );
-    //     }
+        // Assert: The Phantom Data Check!
+        // If the BPM didn't flush the dirty page to disk during Act 3,
+        // it will just read the original, empty page from disk, and these assertions will fail!
+        assert_eq!(
+            123, guard1_reloaded[0],
+            "Dirty page was not flushed to disk before eviction!"
+        );
+        assert_eq!(
+            234, guard1_reloaded[1],
+            "Dirty page was not flushed to disk before eviction!"
+        );
+    }
 
     #[tokio::test]
     async fn test_bpm_fetch_page_returns_error_when_all_frames_pinned() {
