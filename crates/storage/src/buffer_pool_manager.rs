@@ -198,55 +198,77 @@ impl BufferPoolManager {
             return Ok(&self.frames[frame_id]);
         }
 
-        // Pull a free frame ID from the free frames collection...
-        if let Some(frame_id) = self.free_frames.lock().unwrap().pop() {
-            // While the locks are held, insert the new entry into the page table...
-            page_table_guard.insert(page_id, frame_id);
-            // ...and pin the frame.
-            self.pin_frame(frame_id);
-
-            // Notify other threads that this page is processing...
-            let mut io_processing_guard = self.page_io_processing.lock().unwrap();
-            let (tx, _rx) = broadcast::channel::<Result<(), String>>(1);
-            io_processing_guard.insert(page_id, tx.clone());
-
-            // Mutexes cannot be held across async/await boundaries. Drop the locks so we can load from disk asynchronously.
-            drop(io_processing_guard);
-            drop(page_table_guard);
-
-            // Load the page from disk...
-            // Create a temporary buffer to hold the page data read from disk. We cannot read the
-            // page directly into the frame buffer because it's protected by a RwLock which cannot
-            // be held across an 'await' boundary (the disk_manager read operation).
-            let mut read_buffer = [0u8; PAGE_SIZE];            
-            self.disk_manager
-                .read_page(page_id, &mut read_buffer)
-                .await
-                .map_err(|e| {
-                    BufferPoolError::DiskRead(format!(
-                        "Error reading page {} from disk: {}",
-                        page_id, e
-                    ))
-                })?;
-            // Now that the disk read is complete, we can lock our frame and copy the data over to it. Other
-            // threads accessing this page frame will be blocking on the broadcast channel in the IO processing
-            // map.
-            let mut write_guard = self.frames[frame_id].write_data();
-            write_guard.copy_from_slice(&read_buffer);
-
-            // Now send a message via the broadcast channel to let other threads know the page frame IO processing
-            // has completed and remove the channel.
-            let mut io_processing_guard = self.page_io_processing.lock().unwrap();
-            // Remove the page ID from the in IO processing map and get the sender...
-            if let Some(sender) = io_processing_guard.remove(&page_id) {
-                // Notify other threads that the page fetch is complete.
-                let _ = sender.send(Ok(()));
+        let available_frame_id = {
+            if let Some(free_frame_id) = self.free_frames.lock().unwrap().pop() {
+                Some(free_frame_id)
+            } else {
+                // Evict
+                if let Ok((evicted_frame_id, page_data)) = self.evict_page(&mut page_table_guard) {
+                    // TODO: If the page is dirty, capture the data and flush to disk outside of all held locks.
+                    // Otherwise, set the return the frame...                
+                    Some(evicted_frame_id)
+                    // Page table lock is dropped here.
+                } else {
+                    None
+                }
             }
+        };
 
-            return Ok(&self.frames[frame_id]);
-        } else {
-            Err(BufferPoolError::BufferFull)
+        // If no frame ID is found in the free frames and no frame could be evicted, the buffer is full and no
+        // the page cannot be fetched.
+        if let None = available_frame_id {
+            return Err(BufferPoolError::BufferFull);
+        }       
+
+        let frame_id = available_frame_id.unwrap();
+
+        // While the locks are held, insert the new entry into the page table...
+        page_table_guard.insert(page_id, frame_id);
+        // Set the page ID on the frame...
+        self.frames[frame_id].set_page_id(Some(page_id));
+        // ...and pin the frame.
+        self.pin_frame(frame_id);
+
+        // Notify other threads that this page is processing...
+        let mut io_processing_guard = self.page_io_processing.lock().unwrap();
+        let (tx, _rx) = broadcast::channel::<Result<(), String>>(1);
+        io_processing_guard.insert(page_id, tx.clone());
+
+        // Mutexes cannot be held across async/await boundaries. Drop the locks so we can load from disk asynchronously.
+        drop(io_processing_guard);
+        drop(page_table_guard);
+
+        // Load the page from disk...
+        // Create a temporary buffer to hold the page data read from disk. We cannot read the
+        // page directly into the frame buffer because it's protected by a RwLock which cannot
+        // be held across an 'await' boundary (the disk_manager read operation).
+        let mut read_buffer = [0u8; PAGE_SIZE];            
+        self.disk_manager
+            .read_page(page_id, &mut read_buffer)
+            .await
+            .map_err(|e| {
+                BufferPoolError::DiskRead(format!(
+                    "Error reading page {} from disk: {}",
+                    page_id, e
+                ))
+            })?;
+        // Now that the disk read is complete, we can lock our frame and copy the data over to it. Other
+        // threads accessing this page frame will be blocking on the broadcast channel in the IO processing
+        // map.
+        let mut write_guard = self.frames[frame_id].write_data();
+        write_guard.copy_from_slice(&read_buffer);
+
+        // Now send a message via the broadcast channel to let other threads know the page frame IO processing
+        // has completed and remove the channel.
+        let mut io_processing_guard = self.page_io_processing.lock().unwrap();
+        // Remove the page ID from the in IO processing map and get the sender...
+        if let Some(sender) = io_processing_guard.remove(&page_id) {
+            // Notify other threads that the page fetch is complete.
+            let _ = sender.send(Ok(()));
         }
+
+        Ok(&self.frames[frame_id])
+        
     }
 
     /// Attempts to find the page in the cache. Upon a cache miss, if a free frame is available, the
@@ -369,7 +391,6 @@ impl BufferPoolManager {
         &self,
         page_table_guard: &mut MutexGuard<'_, HashMap<PageId, usize>>,
     ) -> Result<(usize, Option<(PageId, [u8; PAGE_SIZE])>), BufferPoolError> {
-        // Lock the page table while attempt to evict a page...
         if let Some(free_frame_id) = self.evictor.victim() {
             let victim_page_id = self.frames[free_frame_id].get_page_id().unwrap();
             // Now that we have a victim we can remove it from the page table...
@@ -998,65 +1019,65 @@ mod tests {
         );
     }
 
-    //     #[tokio::test]
-    //     async fn test_bpm_fetch_page_evicts_unpinned_frame_when_full() {
-    //         let dir = tempdir().unwrap();
-    //         let fs = Arc::new(TokioFileSystem::new());
-    //         let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+    #[tokio::test]
+    async fn test_bpm_fetch_page_evicts_unpinned_frame_when_full() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
 
-    //         let table_id = 600;
-    //         disk_manager
-    //             .create_table_file(table_id)
-    //             .await
-    //             .expect("Should create table file");
+        let table_id = 600;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
 
-    //         // Setup: Pre-allocate 3 pages directly on disk
-    //         let page_id_1 = disk_manager.allocate_page(table_id).await.unwrap();
-    //         let page_id_2 = disk_manager.allocate_page(table_id).await.unwrap();
-    //         let page_id_3 = disk_manager.allocate_page(table_id).await.unwrap();
+        // Setup: Pre-allocate 3 pages directly on disk
+        let page_id_1 = disk_manager.allocate_page(table_id).await.unwrap();
+        let page_id_2 = disk_manager.allocate_page(table_id).await.unwrap();
+        let page_id_3 = disk_manager.allocate_page(table_id).await.unwrap();
 
-    //         let mut buf1 = [0u8; crate::page_id::PAGE_SIZE];
-    //         buf1[0] = 11;
-    //         let mut buf2 = [0u8; crate::page_id::PAGE_SIZE];
-    //         buf2[0] = 22;
-    //         let mut buf3 = [0u8; crate::page_id::PAGE_SIZE];
-    //         buf3[0] = 33;
+        let mut buf1 = [0u8; crate::page_id::PAGE_SIZE];
+        buf1[0] = 11;
+        let mut buf2 = [0u8; crate::page_id::PAGE_SIZE];
+        buf2[0] = 22;
+        let mut buf3 = [0u8; crate::page_id::PAGE_SIZE];
+        buf3[0] = 33;
 
-    //         disk_manager.write_page(page_id_1, &buf1).await.unwrap();
-    //         disk_manager.write_page(page_id_2, &buf2).await.unwrap();
-    //         disk_manager.write_page(page_id_3, &buf3).await.unwrap();
+        disk_manager.write_page(page_id_1, &buf1).await.unwrap();
+        disk_manager.write_page(page_id_2, &buf2).await.unwrap();
+        disk_manager.write_page(page_id_3, &buf3).await.unwrap();
 
-    //         // Act 1: Initialize BPM with ONLY 2 free frames
-    //         let bpm = BufferPoolManager::new(2, disk_manager);
+        // Act 1: Initialize BPM with ONLY 2 free frames
+        let bpm = BufferPoolManager::new(2, disk_manager);
 
-    //         // Act 2: Fill the buffer pool completely
-    //         {
-    //             let guard1 = bpm.fetch_page_read(page_id_1).await.unwrap();
-    //             let guard2 = bpm.fetch_page_read(page_id_2).await.unwrap();
+        // Act 2: Fill the buffer pool completely
+        {
+            let guard1 = bpm.fetch_page_read(page_id_1).await.unwrap();
+            let guard2 = bpm.fetch_page_read(page_id_2).await.unwrap();
 
-    //             assert_eq!(11, guard1[0]);
-    //             assert_eq!(22, guard2[0]);
+            assert_eq!(11, guard1[0]);
+            assert_eq!(22, guard2[0]);
 
-    //             assert_eq!(
-    //                 0,
-    //                 bpm.get_free_frame_count(),
-    //                 "Pool should be completely full"
-    //             );
-    //         } // guard1 and guard2 go out of scope here. The pin_counts for both frames drop to 0!
+            assert_eq!(
+                0,
+                bpm.get_free_frame_count(),
+                "Pool should be completely full"
+            );
+        } // guard1 and guard2 go out of scope here. The pin_counts for both frames drop to 0!
 
-    //         // Act 3: Fetch the 3rd page.
-    //         // We have 0 free frames, so this MUST consult the ClockEvictor, evict an unpinned frame, and reuse it.
-    //         let guard3 = bpm
-    //             .fetch_page_read(page_id_3)
-    //             .await
-    //             .expect("Should successfully evict a frame and fetch page 3");
+        // Act 3: Fetch the 3rd page.
+        // We have 0 free frames, so this MUST consult the ClockEvictor, evict an unpinned frame, and reuse it.
+        let guard3 = bpm
+            .fetch_page_read(page_id_3)
+            .await
+            .expect("Should successfully evict a frame and fetch page 3");
 
-    //         // Assert: We got the correct data for page 3
-    //         assert_eq!(
-    //             33, guard3[0],
-    //             "Evicted frame should contain the newly loaded data"
-    //         );
-    //     }
+        // Assert: We got the correct data for page 3
+        assert_eq!(
+            33, guard3[0],
+            "Evicted frame should contain the newly loaded data"
+        );
+    }
 
     //     #[tokio::test]
     //     async fn test_bpm_evicts_dirty_frame_and_writes_to_disk() {
