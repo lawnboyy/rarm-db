@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    fmt::Error,
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -164,21 +163,47 @@ impl BufferPoolManager {
     /// page is read from disk and loaded into the free frame. If no free frames are available, the
     /// evictor is called to evict a page from the cache to free up a frame.
     async fn fetch_and_pin_frame(&self, page_id: PageId) -> Result<&Frame, BufferPoolError> {
-        // Lock the page table to prepare to insert a new entry...
+        // Lock the page table to prepare read from the cache and pin or to insert a new entry...
         let mut page_table_guard = self.page_table.lock().unwrap();
 
         // Check the cache...
         if let Some(&frame_id) = page_table_guard.get(&page_id) {
+            // Pin the frame while the page table lock is held to prevent an eviction...
             self.pin_frame(frame_id);
+            // With the frame pinned, the page table lock can be dropped
+            drop(page_table_guard);
+
+            // Check if the page is being fetched by checking the processing map. It should not be possible for the page
+            // to be flushing here since it was found in the page table and, hence, has not been evicted.
+            let io_processing_guard = self.page_io_processing.lock().unwrap();
+            let io_processing_result = io_processing_guard.get(&page_id);
+            if let Some(processing_channel) = io_processing_result {
+                // The page is being read from disk by another thread, so subscribe to the channel and wait.
+                let mut sub = processing_channel.subscribe();
+                // Drop the lock to allow other threads to check for in-flight fetches...
+                drop(io_processing_guard);
+                // Block until the page fetch is complete...
+                let result = sub.recv().await;
+
+                // If there is an error waiting on the subscription, return it...
+                if let Err(e) = result {
+                    return Err(BufferPoolError::PageProcessingBroadcast(format!(
+                        "Error waiting on in flight fetch for page {}: {}",
+                        page_id, e
+                    )));
+                }
+            }
+
+            // Return the page frame...
             return Ok(&self.frames[frame_id]);
         }
 
         // Pull a free frame ID from the free frames collection...
-        if let Some(free_frame_id) = self.free_frames.lock().unwrap().pop() {
+        if let Some(frame_id) = self.free_frames.lock().unwrap().pop() {
             // While the locks are held, insert the new entry into the page table...
-            page_table_guard.insert(page_id, free_frame_id);
+            page_table_guard.insert(page_id, frame_id);
             // ...and pin the frame.
-            self.pin_frame(free_frame_id);
+            self.pin_frame(frame_id);
 
             // Notify other threads that this page is processing...
             let mut io_processing_guard = self.page_io_processing.lock().unwrap();
@@ -186,13 +211,16 @@ impl BufferPoolManager {
             io_processing_guard.insert(page_id, tx.clone());
 
             // Mutexes cannot be held across async/await boundaries. Drop the locks so we can load from disk asynchronously.
-            drop(page_table_guard);
             drop(io_processing_guard);
+            drop(page_table_guard);
 
             // Load the page from disk...
-            let mut write_guard = self.frames[free_frame_id].write_data();
+            // Create a temporary buffer to hold the page data read from disk. We cannot read the
+            // page directly into the frame buffer because it's protected by a RwLock which cannot
+            // be held across an 'await' boundary (the disk_manager read operation).
+            let mut read_buffer = [0u8; PAGE_SIZE];            
             self.disk_manager
-                .read_page(page_id, &mut write_guard)
+                .read_page(page_id, &mut read_buffer)
                 .await
                 .map_err(|e| {
                     BufferPoolError::DiskRead(format!(
@@ -200,8 +228,22 @@ impl BufferPoolManager {
                         page_id, e
                     ))
                 })?;
+            // Now that the disk read is complete, we can lock our frame and copy the data over to it. Other
+            // threads accessing this page frame will be blocking on the broadcast channel in the IO processing
+            // map.
+            let mut write_guard = self.frames[frame_id].write_data();
+            write_guard.copy_from_slice(&read_buffer);
 
-            return Ok(&self.frames[free_frame_id]);
+            // Now send a message via the broadcast channel to let other threads know the page frame IO processing
+            // has completed and remove the channel.
+            let mut io_processing_guard = self.page_io_processing.lock().unwrap();
+            // Remove the page ID from the in IO processing map and get the sender...
+            if let Some(sender) = io_processing_guard.remove(&page_id) {
+                // Notify other threads that the page fetch is complete.
+                let _ = sender.send(Ok(()));
+            }
+
+            return Ok(&self.frames[frame_id]);
         } else {
             Err(BufferPoolError::BufferFull)
         }
@@ -219,6 +261,7 @@ impl BufferPoolManager {
     //         // the frame ID value in memory which can't be guaranteed to be valid after the lock is released
     //         // at the end of this scope. We'll need to reference the frame ID outside the scope below if we
     //         // found a cached frame, hence the copy.
+
     //         // Note: The syntax here is confusing, but the Some(&frame_id) is not borrowing a reference to
     //         // the frame_id like it would if we were on the right side of the expression. Instead it is a
     //         // short hand pattern to deference the pointer and copy the underlying value into our frame_id
@@ -512,10 +555,6 @@ mod tests {
         );
     }
 
-    //     #[tokio::test]
-    //     async fn test_bpm_fetch_page_cache_hit() {
-    // ... hidden for brevity ...
-
     #[test]
     fn test_evict_page_returns_error_when_pool_full() {
         let dir = tempdir().unwrap();
@@ -706,42 +745,42 @@ mod tests {
         );
     }
 
-    //     #[tokio::test]
-    //     async fn test_bpm_fetch_page_cache_hit() {
-    //         let dir = tempdir().unwrap();
-    //         let fs = Arc::new(TokioFileSystem::new());
-    //         let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+        #[tokio::test]
+        async fn test_bpm_fetch_page_cache_hit() {
+            let dir = tempdir().unwrap();
+            let fs = Arc::new(TokioFileSystem::new());
+            let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
 
-    //         let table_id = 200;
-    //         disk_manager
-    //             .create_table_file(table_id)
-    //             .await
-    //             .expect("Should create table file");
+            let table_id = 200;
+            disk_manager
+                .create_table_file(table_id)
+                .await
+                .expect("Should create table file");
 
-    //         let bpm = BufferPoolManager::new(2, disk_manager);
+            let bpm = BufferPoolManager::new(2, disk_manager);
 
-    //         // Act 1: Create a brand new page and write to it
-    //         let page_id = {
-    //             let mut page_guard = bpm.create_page(table_id).await.expect("Should create page");
-    //             page_guard[0] = 88;
-    //             page_guard[1] = 99;
-    //             page_guard.mark_dirty();
+            // Act 1: Create a brand new page and write to it
+            let page_id = {
+                let mut page_guard = bpm.create_page(table_id).await.expect("Should create page");
+                page_guard[0] = 88;
+                page_guard[1] = 99;
+                page_guard.mark_dirty();
 
-    //             // Note: We need a way to get the PageId out of the guard!
-    //             page_guard.page_id()
-    //         };
-    //         // The write guard drops here. The frame's pin_count hits 0, and you should add it to the evictor.
+                // Note: We need a way to get the PageId out of the guard!
+                page_guard.page_id()
+            };
+            // The write guard drops here. The frame's pin_count hits 0, and you should add it to the evictor.
 
-    //         // Act 2: Fetch the EXACT same page for reading
-    //         let read_guard = bpm
-    //             .fetch_page_read(page_id)
-    //             .await
-    //             .expect("Should fetch page successfully");
+            // Act 2: Fetch the EXACT same page for reading
+            let read_guard = bpm
+                .fetch_page_read(page_id)
+                .await
+                .expect("Should fetch page successfully");
 
-    //         // Assert 1: The data should be exactly what we wrote (proving it came from memory, not disk)
-    //         assert_eq!(88, read_guard[0]);
-    //         assert_eq!(99, read_guard[1]);
-    //     }
+            // Assert 1: The data should be exactly what we wrote (proving it came from memory, not disk)
+            assert_eq!(88, read_guard[0]);
+            assert_eq!(99, read_guard[1]);
+        }
 
     //     #[tokio::test]
     //     async fn test_bpm_fetch_page_write_cache_hit() {
@@ -835,92 +874,129 @@ mod tests {
     //         assert_eq!(88, read_guard[1]);
     //     }
 
-    //     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    //     async fn test_bpm_concurrent_cache_miss_prevents_phantom_fetch() {
-    //         let dir = tempdir().unwrap();
-    //         let fs = Arc::new(TokioFileSystem::new());
-    //         let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_bpm_concurrent_cache_miss_prevents_phantom_fetch() {
+        // --- CUSTOM MOCK TO EXPOSE RACE CONDITIONS ---
+        // By wrapping the file system and injecting an artificial 50ms delay,
+        // we guarantee the Leader will yield its thread to the Followers.
+        // This forces the Followers to see the page table entry while the read is
+        // still strictly "in-flight". If they don't wait on the channel, they will read 0s!
+        struct SlowFileSystem(TokioFileSystem);
+        
+        #[async_trait::async_trait]
+        impl FileSystem for SlowFileSystem {
+            async fn create_dir_all(&self, path: &std::path::Path) -> std::io::Result<()> { self.0.create_dir_all(path).await }
+            async fn create_file(&self, path: &std::path::Path) -> std::io::Result<Box<dyn crate::file_system::FileHandle>> {
+                let inner = self.0.create_file(path).await?;
+                Ok(Box::new(SlowFileHandle(inner)))
+            }
+            async fn delete_file(&self, path: &std::path::Path) -> std::io::Result<()> { self.0.delete_file(path).await }
+            async fn file_exists(&self, path: &std::path::Path) -> std::io::Result<bool> { self.0.file_exists(path).await }
+            async fn open_file(&self, path: &std::path::Path) -> std::io::Result<Box<dyn crate::file_system::FileHandle>> {
+                let inner = self.0.open_file(path).await?;
+                Ok(Box::new(SlowFileHandle(inner)))
+            }
+        }
 
-    //         let table_id = 500;
-    //         disk_manager
-    //             .create_table_file(table_id)
-    //             .await
-    //             .expect("Should create table file");
+        struct SlowFileHandle(Box<dyn crate::file_system::FileHandle>);
+        
+        #[async_trait::async_trait]
+        impl crate::file_system::FileHandle for SlowFileHandle {
+            async fn len(&self) -> std::io::Result<u64> { self.0.len().await }
+            async fn read_at(&self, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+                println!("  [Disk] Leader thread yielding for artificial disk delay...");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                println!("  [Disk] Leader thread finished disk read delay!");
+                self.0.read_at(buffer, offset).await
+            }
+            async fn set_len(&self, len: u64) -> std::io::Result<()> { self.0.set_len(len).await }
+            async fn write_at(&self, data: &[u8], offset: u64) -> std::io::Result<()> { self.0.write_at(data, offset).await }
+        }
 
-    //         // Setup: Pre-allocate and write the target page to disk
-    //         let page_id = disk_manager
-    //             .allocate_page(table_id)
-    //             .await
-    //             .expect("Should allocate page");
-    //         let mut disk_buffer = [0u8; crate::page_id::PAGE_SIZE];
-    //         disk_buffer[0] = 99;
-    //         disk_manager
-    //             .write_page(page_id, &disk_buffer)
-    //             .await
-    //             .expect("Should write page");
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(SlowFileSystem(TokioFileSystem::new()));
+        let disk_manager = Arc::new(DiskManager::new(
+            Arc::clone(&fs) as Arc<dyn crate::file_system::FileSystem>, 
+            dir.path().to_path_buf()
+        ));
 
-    //         let bpm = Arc::new(BufferPoolManager::new(10, disk_manager));
+        let table_id = 500;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
 
-    //         // FIX: We now use TWO barriers!
-    //         let barrier_ready = Arc::new(std::sync::Barrier::new(11));
-    //         let barrier_done = Arc::new(std::sync::Barrier::new(11));
+        let page_id = disk_manager
+            .allocate_page(table_id)
+            .await
+            .expect("Should allocate page");
+        let mut disk_buffer = [0u8; crate::page_id::PAGE_SIZE];
+        disk_buffer[0] = 99;
+        disk_manager
+            .write_page(page_id, &disk_buffer)
+            .await
+            .expect("Should write page");
 
-    //         let mut handles = vec![];
+        let bpm = Arc::new(BufferPoolManager::new(10, disk_manager));
 
-    //         for _ in 0..10 {
-    //             let bpm_clone = Arc::clone(&bpm);
-    //             let barrier_ready_clone = Arc::clone(&barrier_ready);
-    //             let barrier_done_clone = Arc::clone(&barrier_done);
+        // FIX: We only need ONE barrier now. 
+        // We sacrifice the frozen-state pin_count check to avoid deadlocking the Leader.
+        let barrier_start = Arc::new(std::sync::Barrier::new(11));
 
-    //             handles.push(std::thread::spawn(move || {
-    //                 let rt = tokio::runtime::Builder::new_current_thread()
-    //                     .enable_all()
-    //                     .build()
-    //                     .unwrap();
+        let mut handles = vec![];
 
-    //                 rt.block_on(async move {
-    //                     let read_guard = bpm_clone.fetch_page_read(page_id).await.unwrap();
-    //                     assert_eq!(99, read_guard[0]);
+        for i in 0..10 {
+            let bpm_clone = Arc::clone(&bpm);
+            let barrier_start_clone = Arc::clone(&barrier_start);
 
-    //                     // BARRIER 1: Tell the main thread we have our locks!
-    //                     barrier_ready_clone.wait();
+            handles.push(std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
 
-    //                     // BARRIER 2: Wait for the main thread to finish asserting before we drop!
-    //                     barrier_done_clone.wait();
-    //                 }); // read_guard FINALLY drops here!
-    //             }));
-    //         }
+                rt.block_on(async move {
+                    barrier_start_clone.wait();
+                    println!("[Worker {}] Rushing the cache!", i);
 
-    //         // BARRIER 1: Wait for all 10 workers to get their guards.
-    //         let b_ready_main = Arc::clone(&barrier_ready);
-    //         tokio::task::spawn_blocking(move || b_ready_main.wait())
-    //             .await
-    //             .unwrap();
+                    let frame = bpm_clone.fetch_and_pin_frame(page_id).await.unwrap();
+                    
+                    // Scope the read guard so we drop the RwLock BEFORE asserting.
+                    // This prevents us from deadlocking the Leader who needs the write lock!
+                    let first_byte = {
+                        let read_lock = frame.read_data();
+                        let read_guard = PageReadGuard::new(bpm_clone.evictor.as_ref(), frame, read_lock);
+                        println!("[Worker {}] Acquired read_data() lock!", i);
+                        read_guard[0]
+                    }; // read_guard AND read_lock drop here!
 
-    //         // -----------------------------------------------------
-    //         // THE WORKERS ARE FROZEN. WE ARE SAFE TO ASSERT!
-    //         // -----------------------------------------------------
-    //         assert_eq!(
-    //             9,
-    //             bpm.get_free_frame_count(),
-    //             "Exactly 1 free frame should be consumed."
-    //         );
-    //         assert_eq!(
-    //             Some(10),
-    //             bpm.get_pin_count(page_id),
-    //             "Pin count must be exactly 10."
-    //         );
+                    // Now assert! If this is a Follower that bypassed the wait queue,
+                    // it will read 0 instead of 99 and panic cleanly right here.
+                    assert_eq!(
+                        99, 
+                        first_byte, 
+                        "Follower thread read garbage data! It did not wait for the leader's IO channel to finish."
+                    );
+                });
+            }));
+        }
 
-    //         // BARRIER 2: Release the workers so they can drop their guards and clean up.
-    //         let b_done_main = Arc::clone(&barrier_done);
-    //         tokio::task::spawn_blocking(move || b_done_main.wait())
-    //             .await
-    //             .unwrap();
+        let b_start_main = Arc::clone(&barrier_start);
+        tokio::task::spawn_blocking(move || b_start_main.wait()).await.unwrap();
 
-    //         for handle in handles {
-    //             handle.join().unwrap();
-    //         }
-    //     }
+        // Wait for all tasks to finish. If any follower read garbage data, 
+        // it will have panicked, and this unwrap() will cleanly fail the test.
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // If we reach here, the wait queue is implemented correctly!
+        assert_eq!(
+            9,
+            bpm.get_free_frame_count(),
+            "Exactly 1 free frame should be consumed."
+        );
+    }
 
     //     #[tokio::test]
     //     async fn test_bpm_fetch_page_evicts_unpinned_frame_when_full() {
