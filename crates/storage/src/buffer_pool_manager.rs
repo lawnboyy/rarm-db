@@ -6,8 +6,7 @@ use std::{
 use tokio::{sync::broadcast};
 
 use crate::{
-    BufferPoolError, DiskManager, Evictor, Frame, PageId, PageReadGuard, evictor::ClockEvictor,
-    page_guard::PageWriteGuard, page_id::PAGE_SIZE,
+    BufferPoolError, DiskManager, Evictor, Frame, PageId, PageProcessingMap, PageReadGuard, evictor::ClockEvictor, page_guard::PageWriteGuard, page_id::PAGE_SIZE
 };
 
 pub struct BufferPoolManager {
@@ -17,11 +16,12 @@ pub struct BufferPoolManager {
     frames: Vec<Frame>,
     /// Free frames available for use.
     free_frames: Mutex<Vec<usize>>,
-    /// Map of broadcast channels that tracks any in-flight page fetches. This
+    /// Map of broadcast channels that tracks any in-flight page processing. This
     /// allows other threads that are accessing a page to subcribe to an in-
     /// flight request for the page and sleep until the disk read is complete
-    /// and the page is cached.
-    page_io_processing: Mutex<HashMap<PageId, broadcast::Sender<Result<(), String>>>>,
+    /// and the page is cached. It also allows threads to wait for any flushes
+    /// that are in flight.
+    page_io_processing: Mutex<PageProcessingMap>,
     /// Map of currently cached pages to the frame ID that holds them.
     page_table: Mutex<HashMap<PageId, usize>>,
 }
@@ -39,7 +39,7 @@ impl BufferPoolManager {
             evictor: Box::new(ClockEvictor::new(size)),
             frames: (0..size).map(|i| Frame::new(i)).collect(),
             free_frames: Mutex::new(initial_frames),
-            page_io_processing: Mutex::new(HashMap::new()),
+            page_io_processing: Mutex::new(PageProcessingMap::new()),
             page_table: Mutex::new(HashMap::new()),
         }
     }
@@ -77,7 +77,7 @@ impl BufferPoolManager {
             if self.frames[free_frame_id].is_dirty() {
                 // Create a channel to notify other threads that this page is processing...
                 let (tx, _rx) = broadcast::channel::<Result<(), String>>(1);
-                page_processing_guard.insert(page_id, tx.clone());
+                page_processing_guard.flushes.insert(page_id, tx.clone());
                 // Now that we have our broadcast channel set up we can drop our mutexes and allow other threads to
                 // check if this page is being processed...
                 drop(page_processing_guard);
@@ -110,7 +110,7 @@ impl BufferPoolManager {
 
             // Let waiting threads know that processing is complete and remove the channel for this page ID...
             let mut page_processing_guard = self.page_io_processing.lock().unwrap();
-            if let Some(tx) = page_processing_guard.remove(&page_to_flush_id) {
+            if let Some(tx) = page_processing_guard.flushes.remove(&page_to_flush_id) {
                 // Notify other threads that the page fetch is complete.
                 let _ = tx.send(Ok(()));
             }
@@ -173,26 +173,10 @@ impl BufferPoolManager {
             // With the frame pinned, the page table lock can be dropped
             drop(page_table_guard);
 
+            // Wait for any IO processing involving this page until proceeding.
             // Check if the page is being fetched by checking the processing map. It should not be possible for the page
             // to be flushing here since it was found in the page table and, hence, has not been evicted.
-            let io_processing_guard = self.page_io_processing.lock().unwrap();
-            let io_processing_result = io_processing_guard.get(&page_id);
-            if let Some(processing_channel) = io_processing_result {
-                // The page is being read from disk by another thread, so subscribe to the channel and wait.
-                let mut sub = processing_channel.subscribe();
-                // Drop the lock to allow other threads to check for in-flight fetches...
-                drop(io_processing_guard);
-                // Block until the page fetch is complete...
-                let result = sub.recv().await;
-
-                // If there is an error waiting on the subscription, return it...
-                if let Err(e) = result {
-                    return Err(BufferPoolError::PageProcessingBroadcast(format!(
-                        "Error waiting on in flight fetch for page {}: {}",
-                        page_id, e
-                    )));
-                }
-            }
+            self.wait_for_page_fetch(page_id).await?;
 
             // Return the page frame...
             return Ok(&self.frames[frame_id]);
@@ -234,10 +218,13 @@ impl BufferPoolManager {
         // ...and pin the frame.
         self.pin_frame(frame_id);
 
-        // Notify other threads that this page is processing...
+        // With the page entry added to the page table and the page pinned to prevent eviction, now wait for
+        // any page IO here. This would have to be a flush at this point.
+
+        // Notify other threads that this page is being fetched...
         let mut io_processing_guard = self.page_io_processing.lock().unwrap();
         let (tx, _rx) = broadcast::channel::<Result<(), String>>(1);
-        io_processing_guard.insert(page_id, tx.clone());
+        io_processing_guard.fetches.insert(page_id, tx.clone());
 
         // Mutexes cannot be held across async/await boundaries. Drop the locks so we can load from disk asynchronously.
         drop(io_processing_guard);
@@ -263,11 +250,11 @@ impl BufferPoolManager {
         let mut write_guard = self.frames[frame_id].write_data();
         write_guard.copy_from_slice(&read_buffer);
 
-        // Now send a message via the broadcast channel to let other threads know the page frame IO processing
+        // Now send a message via the broadcast channel to let other threads know the page frame fetch is complete
         // has completed and remove the channel.
         let mut io_processing_guard = self.page_io_processing.lock().unwrap();
         // Remove the page ID from the in IO processing map and get the sender...
-        if let Some(sender) = io_processing_guard.remove(&page_id) {
+        if let Some(sender) = io_processing_guard.fetches.remove(&page_id) {
             // Notify other threads that the page fetch is complete.
             let _ = sender.send(Ok(()));
         }
@@ -333,6 +320,54 @@ impl BufferPoolManager {
         if self.frames[frame_id].increment_pin_count() == 0 {
             self.evictor.remove(frame_id);
         }
+    }
+
+    /// Checks for any in-flight fetches and waits.
+    async fn wait_for_page_fetch(&self, page_id: PageId) -> Result<(), BufferPoolError> {        
+        let io_processing_guard = self.page_io_processing.lock().unwrap();
+        let io_processing_result = io_processing_guard.fetches.get(&page_id);
+        if let Some(processing_channel) = io_processing_result {
+            // The page is being read from disk by another thread, so subscribe to the channel and wait.
+            let mut sub = processing_channel.subscribe();
+            // Drop the lock to allow other threads to check for in-flight fetches...
+            drop(io_processing_guard);
+            // Block until the page fetch is complete...
+            let result = sub.recv().await;
+
+            // If there is an error waiting on the subscription, return it...
+            if let Err(e) = result {
+                return Err(BufferPoolError::PageProcessingBroadcast(format!(
+                    "Error waiting on in flight fetch for page {}: {}",
+                    page_id, e
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Checks for any in-flight fetches and waits.
+    async fn wait_for_page_flush(&self, page_id: PageId) -> Result<(), BufferPoolError> {        
+        let io_processing_guard = self.page_io_processing.lock().unwrap();
+        let io_processing_result = io_processing_guard.flushes.get(&page_id);
+        if let Some(processing_channel) = io_processing_result {
+            // The page is being flushed to disk by another thread, so subscribe to the channel and wait.
+            let mut sub = processing_channel.subscribe();
+            // Drop the lock to allow other threads to check for in-flight flushes...
+            drop(io_processing_guard);
+            // Block until the page flush is complete...
+            let result = sub.recv().await;
+
+            // If there is an error waiting on the subscription, return it...
+            if let Err(e) = result {
+                return Err(BufferPoolError::PageProcessingBroadcast(format!(
+                    "Error waiting on in flight fetch for page {}: {}",
+                    page_id, e
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     // --- Test Helpers ---

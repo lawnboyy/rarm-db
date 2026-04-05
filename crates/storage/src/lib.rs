@@ -6,6 +6,7 @@ pub mod file_system;
 pub mod frame;
 pub mod page_guard;
 pub mod page_id;
+pub mod page_processing_map;
 
 pub use bpm_error::BufferPoolError;
 pub use buffer_pool_manager::BufferPoolManager;
@@ -15,3 +16,4 @@ pub use file_system::FileSystem;
 pub use frame::Frame;
 pub use page_guard::PageReadGuard;
 pub use page_id::PageId;
+pub use page_processing_map::PageProcessingMap;
