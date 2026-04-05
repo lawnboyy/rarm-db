@@ -216,10 +216,7 @@ impl BufferPoolManager {
         // We are about to read this page fresh from disk, so clear the dirty flag.
         self.frames[frame_id].set_dirty(false);
         // ...and pin the frame.
-        self.pin_frame(frame_id);
-
-        // With the page entry added to the page table and the page pinned to prevent eviction, now wait for
-        // any page IO here. This would have to be a flush at this point.
+        self.pin_frame(frame_id);        
 
         // Notify other threads that this page is being fetched...
         let mut io_processing_guard = self.page_io_processing.lock().unwrap();
@@ -229,6 +226,11 @@ impl BufferPoolManager {
         // Mutexes cannot be held across async/await boundaries. Drop the locks so we can load from disk asynchronously.
         drop(io_processing_guard);
         drop(page_table_guard);
+
+
+        // With the page entry added to the page table and the page pinned to prevent eviction, if this page is being
+        // flushed, wait for that to complete before reading from disk.
+        self.wait_for_page_flush(page_id).await?;
 
         // Load the page from disk...
         // Create a temporary buffer to hold the page data read from disk. We cannot read the
