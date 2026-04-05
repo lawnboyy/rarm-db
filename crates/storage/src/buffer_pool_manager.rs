@@ -175,7 +175,12 @@ impl BufferPoolManager {
             // Wait for any IO processing involving this page until proceeding.
             // Check if the page is being fetched by checking the processing map. It should not be possible for the page
             // to be flushing here since it was found in the page table and, hence, has not been evicted.
-            self.wait_for_page_fetch(page_id).await?;
+            let result = self.wait_for_page_fetch(page_id).await;
+            // If there was an error waiting on the broadcast channel, unpin the frame and return the error.
+            if let Err(e) = result {
+                self.unpin_frame(frame_id);
+                return Err(e);
+            }
 
             // Return the page frame...
             return Ok(&self.frames[frame_id]);
@@ -279,7 +284,7 @@ impl BufferPoolManager {
                 .write_page(page_to_flush_id, &page_data)
                 .await;
 
-            {
+            { // Scope the IO processing guard to this block.
                 // Now send a message via the broadcast channel to let other threads know the page frame flush is complete
                 // has completed and remove the channel.
                 let mut io_processing_guard = self.page_io_processing.lock().unwrap();
@@ -290,7 +295,6 @@ impl BufferPoolManager {
                 }
             }
 
-            // TODO: Handle errors here!
             if let Err(error) = result {
                 return Err(BufferPoolError::DiskWrite(format!(
                     "Could not write page: {} to disk! Error: {}",
@@ -342,6 +346,20 @@ impl BufferPoolManager {
         // pinned, then there is no need to update the evictor.
         if self.frames[frame_id].increment_pin_count() == 0 {
             self.evictor.remove(frame_id);
+        }
+    }
+
+    /// Unpins the frame and updates the evictor state to keep them in sync. When the frame
+    /// gets unpinned, if the pin count goes to 0, then the frame becomes eligible for
+    /// eviction.
+    fn unpin_frame(&self, frame_id: usize) {
+        // Decrement the frame's pin count. If the previous pin count was one, then
+        // this operation has transitioned the frame from pinned to unpinned which
+        // means we must tell the evictor to consider the frame eligible for eviction.
+        // If the frame unpin operation does not cause the frame to go from pinned to
+        // unpinned, then no updates the evictor are required.
+        if self.frames[frame_id].decrement_pin_count() == 1 {
+            self.evictor.add(frame_id);
         }
     }
 
