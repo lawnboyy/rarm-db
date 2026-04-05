@@ -547,13 +547,6 @@ mod tests {
             bpm.get_pin_count(page_id),
             "evict_page must remove the victim's page_id from the page_table"
         );
-
-        // Assert 3: The frame must be pinned by evict_page so the evictor doesn't give it out again
-        // assert_eq!(
-        //     1,
-        //     bpm.frames[0].get_pin_count(),
-        //     "evict_page must pin the frame before returning it"
-        // );
     }
 
     #[test]
@@ -608,7 +601,6 @@ mod tests {
             bpm.get_pin_count(page_id),
             "Must remove from page table"
         );
-        // assert_eq!(1, bpm.frames[0].get_pin_count(), "Must pin the frame");
     }
 
     #[tokio::test]
@@ -709,55 +701,55 @@ mod tests {
             assert_eq!(99, read_guard[1]);
         }
 
-    //     #[tokio::test]
-    //     async fn test_bpm_fetch_page_write_cache_hit() {
-    //         let dir = tempdir().unwrap();
-    //         let fs = Arc::new(TokioFileSystem::new());
-    //         let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+    #[tokio::test]
+    async fn test_bpm_fetch_page_write_cache_hit() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
 
-    //         let table_id = 300;
-    //         disk_manager
-    //             .create_table_file(table_id)
-    //             .await
-    //             .expect("Should create table file");
+        let table_id = 300;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
 
-    //         let bpm = BufferPoolManager::new(2, disk_manager);
+        let bpm = BufferPoolManager::new(2, disk_manager);
 
-    //         // Act 1: Create a brand new page and write initial data
-    //         let page_id = {
-    //             let mut page_guard = bpm.create_page(table_id).await.expect("Should create page");
-    //             page_guard[0] = 11;
-    //             page_guard[1] = 22;
-    //             page_guard.mark_dirty();
-    //             page_guard.page_id()
-    //         };
+        // Act 1: Create a brand new page and write initial data
+        let page_id = {
+            let mut page_guard = bpm.create_page(table_id).await.expect("Should create page");
+            page_guard[0] = 11;
+            page_guard[1] = 22;
+            page_guard.mark_dirty();
+            page_guard.page_id()
+        };
 
-    //         // Act 2: Fetch the SAME page for writing (Cache Hit)
-    //         {
-    //             let mut write_guard = bpm
-    //                 .fetch_page_write(page_id)
-    //                 .await
-    //                 .expect("Should fetch page for writing successfully");
+        // Act 2: Fetch the SAME page for writing (Cache Hit)
+        {
+            let mut write_guard = bpm
+                .fetch_page_write(page_id)
+                .await
+                .expect("Should fetch page for writing successfully");
 
-    //             // Verify the old data is there
-    //             assert_eq!(11, write_guard[0]);
-    //             assert_eq!(22, write_guard[1]);
+            // Verify the old data is there
+            assert_eq!(11, write_guard[0]);
+            assert_eq!(22, write_guard[1]);
 
-    //             // Mutate the data
-    //             write_guard[0] = 33;
-    //             write_guard[1] = 44;
-    //             write_guard.mark_dirty();
-    //         } // write_guard drops, frame unpins
+            // Mutate the data
+            write_guard[0] = 33;
+            write_guard[1] = 44;
+            write_guard.mark_dirty();
+        } // write_guard drops, frame unpins
 
-    //         // Act 3: Fetch for reading to verify the second mutation stuck
-    //         let read_guard = bpm
-    //             .fetch_page_read(page_id)
-    //             .await
-    //             .expect("Should fetch page successfully");
+        // Act 3: Fetch for reading to verify the second mutation stuck
+        let read_guard = bpm
+            .fetch_page_read(page_id)
+            .await
+            .expect("Should fetch page successfully");
 
-    //         assert_eq!(33, read_guard[0]);
-    //         assert_eq!(44, read_guard[1]);
-    //     }
+        assert_eq!(33, read_guard[0]);
+        assert_eq!(44, read_guard[1]);
+    }
 
     #[tokio::test]
     async fn test_bpm_fetch_page_cache_miss_with_free_frame() {
