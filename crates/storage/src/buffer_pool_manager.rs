@@ -67,7 +67,6 @@ impl BufferPoolManager {
         } else {
             // There are no free frames available so we must evict a page.
             let mut page_processing_guard = self.page_io_processing.lock().unwrap();
-            // This method pins the frame.
             let evicted_page_data = self.evict_page(&mut page_table_guard).unwrap();
             let free_frame_id = evicted_page_data.0;
             self.pin_frame(free_frame_id);
@@ -87,7 +86,7 @@ impl BufferPoolManager {
             free_frame_id
         };
 
-        // Pin the frame and set the page ID...
+        // Set the page ID...
         let free_frame = &self.frames[frame_id];
         free_frame.set_page_id(Some(page_id));
 
@@ -226,8 +225,12 @@ impl BufferPoolManager {
 
         // While the locks are held, insert the new entry into the page table...
         page_table_guard.insert(page_id, frame_id);
-        // Set the page ID on the frame...
+        
+        // Reset this frame...
+        // Set the page ID on the frame.
         self.frames[frame_id].set_page_id(Some(page_id));
+        // We are about to read this page fresh from disk, so clear the dirty flag.
+        self.frames[frame_id].set_dirty(false);
         // ...and pin the frame.
         self.pin_frame(frame_id);
 
@@ -284,9 +287,7 @@ impl BufferPoolManager {
                     page_to_flush_id, error
                 )));
             }
-        }
-
-        self.frames[frame_id].set_dirty(false);
+        }        
 
         Ok(&self.frames[frame_id])
         
