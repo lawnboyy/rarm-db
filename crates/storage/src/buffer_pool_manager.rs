@@ -75,12 +75,11 @@ impl BufferPoolManager {
             // If the evicted page was dirty, we need to flush it to disk before we release the page_table lock,
             // and we need to add a processing channel to notify other threads that this page is getting flushed.
             if self.frames[free_frame_id].is_dirty() {
+                // Get the ID of the page that is going to be flushed...
+                let id_of_page_to_flush = page_data.unwrap().0;
                 // Create a channel to notify other threads that this page is processing...
                 let (tx, _rx) = broadcast::channel::<Result<(), String>>(1);
-                page_processing_guard.flushes.insert(page_id, tx.clone());
-                // Now that we have our broadcast channel set up we can drop our mutexes and allow other threads to
-                // check if this page is being processed...
-                drop(page_processing_guard);
+                page_processing_guard.flushes.insert(id_of_page_to_flush, tx.clone());
             }
 
             free_frame_id
@@ -188,9 +187,18 @@ impl BufferPoolManager {
                 Some(free_frame_id)
             } else {
                 // Evict
+                let mut page_processing_guard = self.page_io_processing.lock().unwrap();
                 if let Ok((evicted_frame_id, page_data)) = self.evict_page(&mut page_table_guard) {
                     page_data_to_flush = page_data;
-                    // Otherwise, set the return the frame...                
+                    // If the evicted page was dirty, we need to flush it to disk before other threads access it,
+                    // and we need to add a processing channel to notify other threads that this page is getting flushed.
+                    if self.frames[evicted_frame_id].is_dirty() {
+                        // Get the ID of the page that is going to be flushed...
+                        let id_of_page_to_flush = page_data.unwrap().0;
+                        // Create a channel to notify other threads that this page is processing...
+                        let (tx, _rx) = broadcast::channel::<Result<(), String>>(1);
+                        page_processing_guard.flushes.insert(id_of_page_to_flush, tx.clone());
+                    }             
                     Some(evicted_frame_id)
                     // Page table lock is dropped here.
                 } else {
@@ -270,6 +278,19 @@ impl BufferPoolManager {
                 .disk_manager
                 .write_page(page_to_flush_id, &page_data)
                 .await;
+
+            {
+                // Now send a message via the broadcast channel to let other threads know the page frame flush is complete
+                // has completed and remove the channel.
+                let mut io_processing_guard = self.page_io_processing.lock().unwrap();
+                // Remove the page ID from the in IO processing map and get the sender...
+                if let Some(sender) = io_processing_guard.flushes.remove(&page_to_flush_id) {
+                    // Notify other threads that the page fetch is complete.
+                    let _ = sender.send(Ok(()));
+                }
+            }
+
+            // TODO: Handle errors here!
             if let Err(error) = result {
                 return Err(BufferPoolError::DiskWrite(format!(
                     "Could not write page: {} to disk! Error: {}",
