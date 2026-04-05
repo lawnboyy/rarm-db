@@ -1072,42 +1072,42 @@ mod tests {
         );
     }
 
-    //     #[tokio::test]
-    //     async fn test_bpm_create_page_evicts_frame_when_full() {
-    //         let dir = tempdir().unwrap();
-    //         let fs = Arc::new(TokioFileSystem::new());
-    //         let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
+    #[tokio::test]
+    async fn test_bpm_create_page_evicts_frame_when_full() {
+        let dir = tempdir().unwrap();
+        let fs = Arc::new(TokioFileSystem::new());
+        let disk_manager = Arc::new(DiskManager::new(fs, dir.path().to_path_buf()));
 
-    //         let table_id = 900;
-    //         disk_manager
-    //             .create_table_file(table_id)
-    //             .await
-    //             .expect("Should create table file");
+        let table_id = 900;
+        disk_manager
+            .create_table_file(table_id)
+            .await
+            .expect("Should create table file");
 
-    //         // Setup: Pre-allocate 1 page directly on disk
-    //         let page_id_1 = disk_manager.allocate_page(table_id).await.unwrap();
+        // Setup: Pre-allocate 1 page directly on disk
+        let page_id_1 = disk_manager.allocate_page(table_id).await.unwrap();
 
-    //         // Act 1: Initialize BPM with ONLY 1 frame
-    //         let bpm = BufferPoolManager::new(1, disk_manager);
+        // Act 1: Initialize BPM with ONLY 1 frame
+        let bpm = BufferPoolManager::new(1, disk_manager);
 
-    //         // Act 2: Fill the buffer pool completely
-    //         {
-    //             let _guard1 = bpm.fetch_page_read(page_id_1).await.unwrap();
-    //         } // guard1 goes out of scope, Frame 0 is unpinned and eligible for eviction
+        // Act 2: Fill the buffer pool completely
+        {
+            let _guard1 = bpm.fetch_page_read(page_id_1).await.unwrap();
+        } // guard1 goes out of scope, Frame 0 is unpinned and eligible for eviction
 
-    //         // Act 3: Create a NEW page!
-    //         // This should trigger the DiskManager to allocate a new page,
-    //         // AND trigger the BPM to evict Page 1 to make room for it in memory.
-    //         let guard2 = bpm
-    //             .create_page(table_id)
-    //             .await
-    //             .expect("Should successfully evict a frame and create a new page");
+        // Act 3: Create a NEW page!
+        // This should trigger the DiskManager to allocate a new page,
+        // AND trigger the BPM to evict Page 1 to make room for it in memory.
+        let guard2 = bpm
+            .create_page(table_id)
+            .await
+            .expect("Should successfully evict a frame and create a new page");
 
-    //         // Assert: We got a new page with the next sequential index (1)
-    //         assert_eq!(
-    //             1,
-    //             guard2.page_id().page_index,
-    //             "The newly created page should have index 1"
-    //         );
-    //     }
+        // Assert: We got a new page with the next sequential index (1)
+        assert_eq!(
+            1,
+            guard2.page_id().page_index,
+            "The newly created page should have index 1"
+        );
+    }
 }
