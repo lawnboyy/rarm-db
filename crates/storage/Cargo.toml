@@ -7,6 +7,7 @@ edition = "2024"
 async-trait = "0.1.89"
 dashmap = "6.1.0"
 rarmdb_schema_def = { path = "../schema_def" }
+rarmdb_data_model = { path = "../data_model" }
 tokio = { version = "1.49.0", features = ["full"] }
 
 [dev-dependencies]

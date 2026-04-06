@@ -156,16 +156,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "data_model"
-version = "0.1.0"
-dependencies = [
- "rarmdb_schema_def",
- "rust_decimal",
- "serde",
- "smallvec",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -504,6 +494,16 @@ name = "rarmdb_common"
 version = "0.1.0"
 
 [[package]]
+name = "rarmdb_data_model"
+version = "0.1.0"
+dependencies = [
+ "rarmdb_schema_def",
+ "rust_decimal",
+ "serde",
+ "smallvec",
+]
+
+[[package]]
 name = "rarmdb_network"
 version = "0.1.0"
 
@@ -535,6 +535,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dashmap",
+ "rarmdb_data_model",
  "rarmdb_schema_def",
  "tempfile",
  "tokio",
