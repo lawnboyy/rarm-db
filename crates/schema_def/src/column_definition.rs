@@ -33,6 +33,14 @@ impl ColumnDefinition {
             default_value,
         })
     }
+
+    pub fn is_fixed_type(&self) -> bool {
+        match self.data_type {
+            PrimitiveDataType::Blob(u32) => false,
+            PrimitiveDataType::Varchar(u16) => false,
+            _ => true,
+        }
+    }
 }
 
 #[cfg(test)]
