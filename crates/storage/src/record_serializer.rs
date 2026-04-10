@@ -159,4 +159,54 @@ mod tests {
             "Serialized byte array does not match expected fixed-length layout!"
         );
     }
+
+    #[test]
+    fn test_serialize_fixed_length_with_null() {
+        // Setup: A schema with 3 fixed-length columns. The middle column is nullable.
+        let columns = vec![
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+            ColumnDefinition::new(
+                "is_active".to_string(),
+                PrimitiveDataType::Boolean,
+                true,
+                None,
+            )
+            .unwrap(),
+            ColumnDefinition::new("score".to_string(), PrimitiveDataType::Float, false, None)
+                .unwrap(),
+        ];
+
+        let record = Record::from(vec![
+            DataValue::Int(42),
+            DataValue::Null, // The middle column is NULL
+            DataValue::Float(OrderedFloat(99.9)),
+        ]);
+
+        // Act
+        let bytes = RecordSerializer::serialize(&columns, &record);
+
+        // Assert: Build the exact expected byte array manually
+        // Null Bitmap Logic:
+        // Col 0 (Int): Not Null -> Bit 0 = 0
+        // Col 1 (Bool): Null -> Bit 1 = 1
+        // Col 2 (Float): Not Null -> Bit 2 = 0
+        // Binary: 00000010 = 2u8
+        let mut expected_bytes = vec![2u8];
+
+        // Data Section:
+        expected_bytes.extend_from_slice(&42i32.to_le_bytes()); // Col 0: Int (4 bytes)
+        // Col 1 is NULL, so we DO NOT write the 1 byte for the boolean!
+        expected_bytes.extend_from_slice(&99.9f64.to_le_bytes()); // Col 2: Float (8 bytes)
+
+        assert_eq!(
+            expected_bytes.len(),
+            13,
+            "Serialized byte array size is incorrect. Did you skip the null column's data space?"
+        );
+
+        assert_eq!(
+            expected_bytes, bytes,
+            "Serialized byte array does not match expected layout for null values!"
+        );
+    }
 }
