@@ -46,16 +46,16 @@ impl RecordSerializer {
         let mut current_variable_offset = null_bitmap_size + fixed_length_size;
         for i in 0..columns.len() {
             let col_def = &columns[i];
-            if let Some(fixed_size) = col_def.data_type.get_fixed_size() {
-                // If the value is null, then update the null bitmap
-                if record[i] == DataValue::Null {
-                    // Determine which byte the column bit resides in...
-                    let null_bitmap_byte_index = i / 8;
-                    let bit_in_byte = i % 8;
-                    bytes[null_bitmap_byte_index] |= 1 << bit_in_byte;
-                    continue;
-                }
+            // If the value is null, then update the null bitmap
+            if record[i] == DataValue::Null {
+                // Determine which byte the column bit resides in...
+                let null_bitmap_byte_index = i / 8;
+                let bit_in_byte = i % 8;
+                bytes[null_bitmap_byte_index] |= 1 << bit_in_byte;
+                continue;
+            }
 
+            if let Some(fixed_size) = col_def.data_type.get_fixed_size() {
                 // Otherwise, it is a non-null fixed value...
                 let current_value = &record[i];
                 match *current_value {
@@ -86,14 +86,6 @@ impl RecordSerializer {
                 }
                 current_fixed_offset += fixed_size;
             } else {
-                // If the value is null, then update the null bitmap
-                if record[i] == DataValue::Null {
-                    // Determine which byte the column bit resides in...
-                    let null_bitmap_byte_index = i / 8;
-                    let bit_in_byte = i % 8;
-                    bytes[null_bitmap_byte_index] |= 1 << bit_in_byte;
-                    continue;
-                }
                 // Variable length value
                 // Otherwise, it is a non-null variable value...
                 let current_value = &record[i];
@@ -486,5 +478,75 @@ mod tests {
             expected_bytes, bytes,
             "Serialized byte array failed the 'All Types' gauntlet!"
         );
+    }
+
+    #[test]
+    fn test_serialize_bitmap_overflow_and_empty_strings() {
+        // Setup: 9 columns to force a 2-byte null bitmap
+        let mut columns = Vec::new();
+        for i in 0..8 {
+            columns.push(
+                ColumnDefinition::new(format!("col_{}", i), PrimitiveDataType::Int, true, None)
+                    .unwrap(),
+            );
+        }
+        // The 9th column
+        columns.push(
+            ColumnDefinition::new(
+                "last_col".to_string(),
+                PrimitiveDataType::Varchar(255),
+                true,
+                None,
+            )
+            .unwrap(),
+        );
+
+        // Record: 1st col is Null, 9th col is an EMPTY string (not null)
+        let mut values = vec![DataValue::Null];
+        for _ in 1..8 {
+            values.push(DataValue::Int(1));
+        }
+        values.push(DataValue::Text("".to_string()));
+
+        let record = Record::from(values);
+
+        // Act
+        let bytes = RecordSerializer::serialize(&columns, &record);
+
+        // Assert
+        // Bitmap:
+        // Byte 0: 00000001 (Col 0 is null) -> 1u8
+        // Byte 1: 00000000 (Col 8 is NOT null, it's an empty string) -> 0u8
+        assert_eq!(bytes[0], 1);
+        assert_eq!(bytes[1], 0);
+
+        // Pass 2 (Variable): The empty string should still write its 4-byte length (0)
+        // Offset: 2 (bitmap) + 28 (7 ints) = 30.
+        let length_bytes: [u8; 4] = bytes[30..34].try_into().unwrap();
+        assert_eq!(i32::from_le_bytes(length_bytes), 0);
+        assert_eq!(bytes.len(), 34);
+    }
+
+    #[test]
+    fn test_serialize_complex_utf8() {
+        let columns = vec![
+            ColumnDefinition::new(
+                "emoji".to_string(),
+                PrimitiveDataType::Varchar(255),
+                false,
+                None,
+            )
+            .unwrap(),
+        ];
+
+        // The Crab emoji is 4 bytes in UTF-8: [240, 159, 166, 128]
+        let record = Record::from(vec![DataValue::Text("🦀".to_string())]);
+
+        let bytes = RecordSerializer::serialize(&columns, &record);
+
+        // 1 (bitmap) + 4 (length) + 4 (data) = 9 bytes
+        assert_eq!(bytes.len(), 9);
+        assert_eq!(i32::from_le_bytes(bytes[1..5].try_into().unwrap()), 4);
+        assert_eq!(&bytes[5..9], "🦀".as_bytes());
     }
 }
