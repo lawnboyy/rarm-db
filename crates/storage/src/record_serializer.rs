@@ -48,10 +48,9 @@ impl RecordSerializer {
         let mut current_fixed_offset = null_bitmap_size;
         // Track a second offset for variable length values...
         let mut current_variable_offset = null_bitmap_size + fixed_length_size;
-        for i in 0..columns.len() {
-            let col_def = &columns[i];
+        for (i, (col_def, current_value)) in columns.iter().zip(record.iter()).enumerate() {
             // If the value is null, then update the null bitmap
-            if record[i] == DataValue::Null {
+            if *current_value == DataValue::Null {
                 // Determine which byte the column bit resides in...
                 let null_bitmap_byte_index = i / 8;
                 let bit_in_byte = i % 8;
@@ -61,7 +60,6 @@ impl RecordSerializer {
 
             if let Some(fixed_size) = col_def.data_type.get_fixed_size() {
                 // Otherwise, it is a non-null fixed value...
-                let current_value = &record[i];
                 match *current_value {
                     DataValue::BigInt(val) => {
                         bytes[current_fixed_offset..current_fixed_offset + fixed_size]
@@ -92,7 +90,6 @@ impl RecordSerializer {
             } else {
                 // Variable length value
                 // Otherwise, it is a non-null variable value...
-                let current_value = &record[i];
                 let variable_length = variable_length_sizes[variable_length_col_index];
                 variable_length_col_index += 1;
                 match &current_value {
