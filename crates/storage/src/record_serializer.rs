@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use rarmdb_data_model::{DataValue, Record};
 use rarmdb_schema_def::ColumnDefinition;
 
@@ -28,12 +30,17 @@ impl RecordSerializer {
     /// the table column definitions.
     pub fn serialize(columns: &[ColumnDefinition], record: &Record) -> Vec<u8> {
         let null_bitmap_size = RecordSerializer::get_null_bitmap_size(columns);
-        let total_record_size: usize =
-            RecordSerializer::calculate_serialized_record_size(columns, record);
+        let mut variable_length_lookup = HashMap::<String, usize>::new();
+        let total_record_size: usize = RecordSerializer::calculate_serialized_record_size(
+            columns,
+            record,
+            &mut variable_length_lookup,
+        );
         let mut bytes = vec![0u8; total_record_size];
 
         // The starting offset of the record values will be immediately after null bitmap...
-        let mut current_offset = null_bitmap_size;
+        let mut current_fixed_offset = null_bitmap_size;
+        //let mut current_variable_offset =
         for i in 0..columns.len() {
             let col_def = &columns[i];
             if let Some(fixed_size) = col_def.data_type.get_fixed_size() {
@@ -50,31 +57,67 @@ impl RecordSerializer {
                 let current_value = &record[i];
                 match *current_value {
                     DataValue::BigInt(val) => {
-                        bytes[current_offset..current_offset + fixed_size]
+                        bytes[current_fixed_offset..current_fixed_offset + fixed_size]
                             .copy_from_slice(&val.to_le_bytes());
                     }
                     DataValue::Boolean(val) => {
-                        bytes[current_offset] = val as u8;
+                        bytes[current_fixed_offset] = val as u8;
                     }
                     DataValue::DateTime(val) => {
-                        bytes[current_offset..current_offset + fixed_size]
+                        bytes[current_fixed_offset..current_fixed_offset + fixed_size]
                             .copy_from_slice(&val.to_le_bytes());
                     }
                     DataValue::Decimal(val) => {
-                        bytes[current_offset..current_offset + fixed_size]
+                        bytes[current_fixed_offset..current_fixed_offset + fixed_size]
                             .copy_from_slice(&val.serialize());
                     }
                     DataValue::Float(val) => {
-                        bytes[current_offset..current_offset + fixed_size]
+                        bytes[current_fixed_offset..current_fixed_offset + fixed_size]
                             .copy_from_slice(&val.0.to_le_bytes());
                     }
                     DataValue::Int(val) => {
-                        bytes[current_offset..current_offset + fixed_size]
+                        bytes[current_fixed_offset..current_fixed_offset + fixed_size]
                             .copy_from_slice(&val.to_le_bytes());
                     }
                     _ => continue,
                 }
-                current_offset += fixed_size;
+                current_fixed_offset += fixed_size;
+            } else {
+                // If the value is null, then update the null bitmap
+                if record[i] == DataValue::Null {
+                    // Determine which byte the column bit resides in...
+                    let null_bitmap_byte_index = i / 8;
+                    let bit_in_byte = i % 8;
+                    bytes[null_bitmap_byte_index] |= 1 << bit_in_byte;
+                    continue;
+                }
+                // Variable length value
+                // Otherwise, it is a non-null variable value...
+                let current_value = &record[i];
+                let variable_length = variable_length_lookup[&col_def.name];
+                match &current_value {
+                    DataValue::Blob(val) => {
+                        let length_offset = current_fixed_offset;
+                        let blob_offset = length_offset + size_of::<i32>();
+                        // Serialize the length of the data...
+                        bytes[length_offset..length_offset + size_of::<i32>()]
+                            .copy_from_slice(&variable_length.to_le_bytes());
+                        // Serialize the data...
+                        bytes[blob_offset..blob_offset + variable_length].copy_from_slice(&val);
+                    }
+                    DataValue::Text(val) => {
+                        let length_offset = current_fixed_offset;
+                        let str_offset = length_offset + size_of::<i32>();
+                        // Serialize the length of the data...
+                        bytes[length_offset..length_offset + size_of::<i32>()]
+                            .copy_from_slice(&(variable_length as i32).to_le_bytes());
+                        // Serialize the data...
+                        bytes[str_offset..str_offset + variable_length]
+                            .copy_from_slice(&val.as_bytes());
+                    }
+                    _ => continue,
+                }
+                current_fixed_offset += size_of::<i32>() + variable_length;
             }
         }
 
@@ -89,6 +132,7 @@ impl RecordSerializer {
     pub fn calculate_serialized_record_size(
         columns: &[ColumnDefinition],
         record: &Record,
+        variable_length_lookup: &mut HashMap<String, usize>,
     ) -> usize {
         let null_bitmap_size = RecordSerializer::get_null_bitmap_size(columns);
         let mut total_record_size = null_bitmap_size as usize;
@@ -105,8 +149,29 @@ impl RecordSerializer {
             let col_def = &columns[i];
             if let Some(fixed_size) = col_def.data_type.get_fixed_size() {
                 total_record_size += fixed_size;
+            } else {
+                // This is a variable length column, so determine the exact length of the value
+                // We'll capture the length of the value to store along with the value...
+                total_record_size += size_of::<i32>();
+
+                // Now determine the length of the data.
+                match &row_value {
+                    DataValue::Blob(val) => {
+                        let blob_size = val.len();
+                        total_record_size += blob_size;
+                        variable_length_lookup.insert(col_def.name.clone(), blob_size);
+                    }
+                    DataValue::Text(val) => {
+                        let string_size = val.as_bytes().len();
+                        total_record_size += string_size;
+                        variable_length_lookup.insert(col_def.name.clone(), string_size);
+                    }
+                    _ => {
+                        // TODO: We should probably throw an error here...
+                        continue;
+                    }
+                }
             }
-            // TODO: Calculate variable size
         }
 
         total_record_size
@@ -207,6 +272,52 @@ mod tests {
         assert_eq!(
             expected_bytes, bytes,
             "Serialized byte array does not match expected layout for null values!"
+        );
+    }
+
+    #[test]
+    fn test_serialize_variable_length() {
+        // Setup: A schema with 1 fixed-length column and 1 variable-length column
+        let columns = vec![
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+            ColumnDefinition::new(
+                "name".to_string(),
+                PrimitiveDataType::Varchar(255),
+                false,
+                None,
+            )
+            .unwrap(),
+        ];
+
+        let record = Record::from(vec![
+            DataValue::Int(10),
+            DataValue::Text("Alice".to_string()),
+        ]);
+
+        // Act
+        let bytes = RecordSerializer::serialize(&columns, &record);
+
+        // Assert: Build expected byte array manually based on the two-pass architecture
+        let mut expected_bytes = vec![0u8]; // Null Bitmap (no nulls)
+
+        // Pass 1: Fixed-Length Data
+        expected_bytes.extend_from_slice(&10i32.to_le_bytes()); // Col 0: Int (4 bytes)
+
+        // Pass 2: Variable-Length Data
+        // The C# logic writes the length as an Int32 first...
+        expected_bytes.extend_from_slice(&5i32.to_le_bytes());
+        // ...followed immediately by the raw UTF-8 bytes
+        expected_bytes.extend_from_slice("Alice".as_bytes());
+
+        assert_eq!(
+            14,
+            expected_bytes.len(),
+            "Expected size is 1 (bitmap) + 4 (id) + 4 (string length) + 5 (string data) = 14 bytes"
+        );
+
+        assert_eq!(
+            expected_bytes, bytes,
+            "Serialized byte array does not match expected layout for variable-length data!"
         );
     }
 }
