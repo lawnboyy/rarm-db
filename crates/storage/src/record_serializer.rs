@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use rarmdb_data_model::{DataValue, Record};
 use rarmdb_schema_def::ColumnDefinition;
 
@@ -30,14 +28,15 @@ impl RecordSerializer {
     /// the table column definitions.
     pub fn serialize(columns: &[ColumnDefinition], record: &Record) -> Vec<u8> {
         let null_bitmap_size = RecordSerializer::get_null_bitmap_size(columns);
-        let mut variable_length_lookup = HashMap::<String, usize>::new();
+        let mut variable_length_sizes = Vec::<usize>::new();
         let mut fixed_length_size: usize = 0;
         let total_record_size: usize = RecordSerializer::calculate_serialized_record_size(
             columns,
             record,
-            &mut variable_length_lookup,
+            &mut variable_length_sizes,
             &mut fixed_length_size,
         );
+        let mut variable_length_col_index = 0;
         let mut bytes = vec![0u8; total_record_size];
 
         // The starting offset of the record values will be immediately after null bitmap...
@@ -89,7 +88,8 @@ impl RecordSerializer {
                 // Variable length value
                 // Otherwise, it is a non-null variable value...
                 let current_value = &record[i];
-                let variable_length = variable_length_lookup[&col_def.name];
+                let variable_length = variable_length_sizes[variable_length_col_index];
+                variable_length_col_index += 1;
                 match &current_value {
                     DataValue::Blob(val) => {
                         let length_offset = current_variable_offset;
@@ -127,7 +127,7 @@ impl RecordSerializer {
     fn calculate_serialized_record_size(
         columns: &[ColumnDefinition],
         record: &Record,
-        variable_length_lookup: &mut HashMap<String, usize>,
+        variable_length_sizes: &mut Vec<usize>,
         fixed_length_size: &mut usize,
     ) -> usize {
         let null_bitmap_size = RecordSerializer::get_null_bitmap_size(columns);
@@ -156,12 +156,12 @@ impl RecordSerializer {
                     DataValue::Blob(val) => {
                         let blob_size = val.len();
                         total_record_size += blob_size;
-                        variable_length_lookup.insert(col_def.name.clone(), blob_size);
+                        variable_length_sizes.push(blob_size);
                     }
                     DataValue::Text(val) => {
                         let string_size = val.as_bytes().len();
                         total_record_size += string_size;
-                        variable_length_lookup.insert(col_def.name.clone(), string_size);
+                        variable_length_sizes.push(string_size);
                     }
                     _ => {
                         // TODO: We should probably throw an error here...
