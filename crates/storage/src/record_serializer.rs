@@ -549,4 +549,46 @@ mod tests {
         assert_eq!(i32::from_le_bytes(bytes[1..5].try_into().unwrap()), 4);
         assert_eq!(&bytes[5..9], "🦀".as_bytes());
     }
+
+    #[test]
+    fn test_serialize_all_null_record() {
+        let mut columns = Vec::new();
+        for i in 0..8 {
+            columns.push(
+                ColumnDefinition::new(format!("col_{}", i), PrimitiveDataType::Int, true, None)
+                    .unwrap(),
+            );
+        }
+        let record = Record::from(vec![DataValue::Null; 8]);
+        let bytes = RecordSerializer::serialize(&columns, &record);
+
+        // Assert: 1-byte bitmap with every bit set (255) and no data
+        assert_eq!(bytes.len(), 1);
+        assert_eq!(bytes[0], 255);
+    }
+
+    #[test]
+    fn test_serialize_large_blob_boundary() {
+        let columns = vec![
+            ColumnDefinition::new(
+                "large_data".to_string(),
+                PrimitiveDataType::Blob(1024 * 1024),
+                false,
+                None,
+            )
+            .unwrap(),
+        ];
+        // 64 KB of data
+        let size = 65536;
+        let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+        let record = Record::from(vec![DataValue::Blob(data.clone())]);
+
+        let bytes = RecordSerializer::serialize(&columns, &record);
+
+        // Assert: 1 (bitmap) + 4 (length prefix) + 65536 (data)
+        assert_eq!(bytes.len(), 1 + 4 + size);
+        let length_bytes: [u8; 4] = bytes[1..5].try_into().unwrap();
+        assert_eq!(i32::from_le_bytes(length_bytes), size as i32);
+        assert_eq!(&bytes[5..], &data[..]);
+    }
 }
