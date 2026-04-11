@@ -8,6 +8,7 @@ pub mod page_guard;
 pub mod page_id;
 pub mod page_processing_map;
 pub mod record_serializer;
+pub mod serialization_error;
 
 pub use bpm_error::BufferPoolError;
 pub use buffer_pool_manager::BufferPoolManager;
@@ -19,3 +20,4 @@ pub use page_guard::PageReadGuard;
 pub use page_id::PageId;
 pub use page_processing_map::PageProcessingMap;
 pub use record_serializer::RecordSerializer;
+pub use serialization_error::SerializationError;

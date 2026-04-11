@@ -1,6 +1,8 @@
 use rarmdb_data_model::{DataValue, Record};
 use rarmdb_schema_def::ColumnDefinition;
 
+use crate::SerializationError;
+
 pub struct RecordSerializer;
 
 /// Serializer for data records for reading and writing to slotted page cells. The format of the data
@@ -26,7 +28,10 @@ impl RecordSerializer {
     /// Serializes a Record into a byte array using the given column definitions.
     /// It is expected that the row column data matches the ordering and types of
     /// the table column definitions.
-    pub fn serialize(columns: &[ColumnDefinition], record: &Record) -> Vec<u8> {
+    pub fn serialize(
+        columns: &[ColumnDefinition],
+        record: &Record,
+    ) -> Result<Vec<u8>, SerializationError> {
         let null_bitmap_size = RecordSerializer::get_null_bitmap_size(columns);
         let mut variable_length_sizes = Vec::<usize>::new();
         let mut fixed_length_size: usize = 0;
@@ -81,7 +86,7 @@ impl RecordSerializer {
                         bytes[current_fixed_offset..current_fixed_offset + fixed_size]
                             .copy_from_slice(&val.to_le_bytes());
                     }
-                    _ => continue,
+                    _ => return Err(SerializationError::DataTypeMismatch),
                 }
                 current_fixed_offset += fixed_size;
             } else {
@@ -110,13 +115,13 @@ impl RecordSerializer {
                         bytes[str_offset..str_offset + variable_length]
                             .copy_from_slice(&val.as_bytes());
                     }
-                    _ => continue,
+                    _ => return Err(SerializationError::DataTypeMismatch),
                 }
                 current_variable_offset += size_of::<i32>() + variable_length;
             }
         }
 
-        bytes
+        Ok(bytes)
     }
 
     /// Deserializes a read-only slice of bytes into a Record.
@@ -208,7 +213,7 @@ mod tests {
         ]);
 
         // Act
-        let bytes = RecordSerializer::serialize(&columns, &record);
+        let bytes = RecordSerializer::serialize(&columns, &record).unwrap();
 
         // Assert: Build the exact expected byte array manually
         let mut expected_bytes = vec![0u8]; // 1-byte Null Bitmap (0 = no nulls)
@@ -245,7 +250,7 @@ mod tests {
         ]);
 
         // Act
-        let bytes = RecordSerializer::serialize(&columns, &record);
+        let bytes = RecordSerializer::serialize(&columns, &record).unwrap();
 
         // Assert: Build the exact expected byte array manually
         // Null Bitmap Logic:
@@ -292,7 +297,7 @@ mod tests {
         ]);
 
         // Act
-        let bytes = RecordSerializer::serialize(&columns, &record);
+        let bytes = RecordSerializer::serialize(&columns, &record).unwrap();
 
         // Assert: Build expected byte array manually based on the two-pass architecture
         let mut expected_bytes = vec![0u8]; // Null Bitmap (no nulls)
@@ -346,7 +351,7 @@ mod tests {
         ]);
 
         // Act
-        let bytes = RecordSerializer::serialize(&columns, &record);
+        let bytes = RecordSerializer::serialize(&columns, &record).unwrap();
 
         // Assert: Build expected byte array manually based on the two-pass architecture
         let mut expected_bytes = vec![0u8]; // Null Bitmap (no nulls)
@@ -446,7 +451,7 @@ mod tests {
         ]);
 
         // Act
-        let bytes = RecordSerializer::serialize(&columns, &record);
+        let bytes = RecordSerializer::serialize(&columns, &record).unwrap();
 
         // Assert: Build expected byte array manually
         let mut expected_bytes = vec![0u8]; // Null Bitmap (1 byte covers up to 8 columns)
@@ -511,7 +516,7 @@ mod tests {
         let record = Record::from(values);
 
         // Act
-        let bytes = RecordSerializer::serialize(&columns, &record);
+        let bytes = RecordSerializer::serialize(&columns, &record).unwrap();
 
         // Assert
         // Bitmap:
@@ -542,7 +547,7 @@ mod tests {
         // The Crab emoji is 4 bytes in UTF-8: [240, 159, 166, 128]
         let record = Record::from(vec![DataValue::Text("🦀".to_string())]);
 
-        let bytes = RecordSerializer::serialize(&columns, &record);
+        let bytes = RecordSerializer::serialize(&columns, &record).unwrap();
 
         // 1 (bitmap) + 4 (length) + 4 (data) = 9 bytes
         assert_eq!(bytes.len(), 9);
@@ -560,7 +565,7 @@ mod tests {
             );
         }
         let record = Record::from(vec![DataValue::Null; 8]);
-        let bytes = RecordSerializer::serialize(&columns, &record);
+        let bytes = RecordSerializer::serialize(&columns, &record).unwrap();
 
         // Assert: 1-byte bitmap with every bit set (255) and no data
         assert_eq!(bytes.len(), 1);
@@ -583,7 +588,7 @@ mod tests {
         let data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
         let record = Record::from(vec![DataValue::Blob(data.clone())]);
 
-        let bytes = RecordSerializer::serialize(&columns, &record);
+        let bytes = RecordSerializer::serialize(&columns, &record).unwrap();
 
         // Assert: 1 (bitmap) + 4 (length prefix) + 65536 (data)
         assert_eq!(bytes.len(), 1 + 4 + size);
