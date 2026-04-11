@@ -1,5 +1,6 @@
 use rarmdb_data_model::{DataValue, Record};
-use rarmdb_schema_def::ColumnDefinition;
+use rarmdb_schema_def::{ColumnDefinition, PrimitiveDataType};
+use rust_decimal::Decimal;
 
 use crate::SerializationError;
 
@@ -122,9 +123,113 @@ impl RecordSerializer {
     }
 
     /// Deserializes a read-only slice of bytes into a Record.
-    // pub fn deserialize(columns: &[ColumnDefinition], bytes: &[u8]) -> Record {
-    //     todo!("Implement record deserialization")
-    // }
+    pub fn deserialize(
+        columns: &[ColumnDefinition],
+        bytes: &[u8],
+    ) -> Result<Record, SerializationError> {
+        let col_count = columns.len();
+        let mut data_values = vec![DataValue::Null; col_count];
+        let null_bitmap_size = RecordSerializer::get_null_bitmap_size(columns);
+        let null_bitmap = bytes[0..null_bitmap_size].iter().as_slice();
+
+        // Track the current fixed sized data offset
+        let mut current_fixed_size_offset = null_bitmap_size;
+        // Track the current variable sized data offset
+        let mut current_variable_size_offset = RecordSerializer::get_variable_length_data_offset(
+            columns,
+            null_bitmap,
+            null_bitmap_size,
+        );
+
+        for (i, col_def) in columns.iter().enumerate() {
+            if RecordSerializer::is_col_value_null(null_bitmap, i) {
+                // Reject a null value for a non-nullable column.
+                if !col_def.is_nullable {
+                    return Err(SerializationError::NullValueForNonNullColumnFound);
+                }
+
+                data_values[i] = DataValue::Null;
+                continue;
+            }
+
+            data_values[i] = RecordSerializer::deserialize_col_value(
+                col_def,
+                bytes,
+                &mut current_fixed_size_offset,
+                &mut current_variable_size_offset,
+            );
+        }
+
+        Ok(Record::from(data_values))
+    }
+
+    fn deserialize_col_value(
+        col_def: &ColumnDefinition,
+        bytes: &[u8],
+        current_fixed_sized_data_offset: &mut usize,
+        current_variable_sized_data_offset: &mut usize,
+    ) -> DataValue {
+        if col_def.data_type.is_fixed_size() {
+            let data_size = col_def.data_type.get_fixed_size().unwrap();
+            let row_value = RecordSerializer::deserialize_fixed_sized_col_value(
+                col_def,
+                bytes,
+                current_fixed_sized_data_offset,
+                data_size,
+            );
+
+            *current_fixed_sized_data_offset += data_size;
+
+            // TODO: Gracefully handle errors...
+            // if let Err(e) = row_value {
+            //     return e;
+            // }
+
+            return row_value.unwrap();
+        }
+
+        DataValue::Null
+    }
+
+    fn deserialize_fixed_sized_col_value(
+        col_def: &ColumnDefinition,
+        bytes: &[u8],
+        current_fixed_sized_data_offset: &usize,
+        data_size: usize,
+    ) -> Result<DataValue, SerializationError> {
+        let data_value =
+            &bytes[*current_fixed_sized_data_offset..*current_fixed_sized_data_offset + data_size];
+        match col_def.data_type {
+            PrimitiveDataType::BigInt => {
+                let val = i64::from_le_bytes(data_value.try_into().unwrap());
+                Ok(DataValue::BigInt(val))
+            }
+            PrimitiveDataType::Boolean => {
+                let val = data_value[0];
+                Ok(DataValue::Boolean(val != 0))
+            }
+            PrimitiveDataType::DateTime => {
+                let val = i64::from_le_bytes(data_value.try_into().unwrap());
+                Ok(DataValue::DateTime(val))
+            }
+            PrimitiveDataType::Decimal(l, p) => {
+                let arr: [u8; 16] = data_value
+                    .try_into()
+                    .map_err(|_| SerializationError::DataTypeMismatch)?;
+                let val = rust_decimal::Decimal::deserialize(arr);
+                Ok(DataValue::Decimal(val))
+            }
+            PrimitiveDataType::Float => {
+                let val = f64::from_le_bytes(data_value.try_into().unwrap());
+                Ok(DataValue::Float(rarmdb_data_model::OrderedFloat(val)))
+            }
+            PrimitiveDataType::Int => {
+                let val = i32::from_le_bytes(data_value.try_into().unwrap());
+                Ok(DataValue::Int(val))
+            }
+            _ => Err(SerializationError::DataTypeMismatch),
+        }
+    }
 
     fn calculate_serialized_record_size(
         columns: &[ColumnDefinition],
@@ -178,6 +283,34 @@ impl RecordSerializer {
 
     pub fn get_null_bitmap_size(columns: &[ColumnDefinition]) -> usize {
         (columns.len() + 7) / 8
+    }
+
+    fn get_variable_length_data_offset(
+        columns: &[ColumnDefinition],
+        null_bitmap: &[u8],
+        null_bitmap_size: usize,
+    ) -> usize {
+        // let col_count = columns.len();
+        let mut offset = null_bitmap_size;
+
+        for (i, col_def) in columns.iter().enumerate() {
+            if RecordSerializer::is_col_value_null(null_bitmap, i) {
+                continue;
+            }
+
+            if col_def.is_fixed_type() {
+                offset += col_def.data_type.get_fixed_size().unwrap();
+            }
+        }
+
+        offset
+    }
+
+    fn is_col_value_null(null_bitmap: &[u8], index: usize) -> bool {
+        let null_bitmap_byte_index = index / 8;
+        let null_bitmap_byte = null_bitmap[null_bitmap_byte_index];
+        let bit_in_byte = index & 8;
+        return (null_bitmap_byte & (1 << bit_in_byte)) != 0;
     }
 }
 
@@ -592,5 +725,38 @@ mod tests {
         let length_bytes: [u8; 4] = bytes[1..5].try_into().unwrap();
         assert_eq!(i32::from_le_bytes(length_bytes), size as i32);
         assert_eq!(&bytes[5..], &data[..]);
+    }
+
+    #[test]
+    fn test_deserialize_fixed_length_only() {
+        // Setup: A schema with exactly 3 fixed-length columns
+        let columns = vec![
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+            ColumnDefinition::new(
+                "is_active".to_string(),
+                PrimitiveDataType::Boolean,
+                false,
+                None,
+            )
+            .unwrap(),
+            ColumnDefinition::new("score".to_string(), PrimitiveDataType::Float, false, None)
+                .unwrap(),
+        ];
+
+        // Manually build the bytes as they should appear on disk
+        let mut bytes = vec![0u8]; // 1-byte Null Bitmap (0 = no nulls)
+        bytes.extend_from_slice(&42i32.to_le_bytes()); // Col 0: 42
+        bytes.extend_from_slice(&[1u8]); // Col 1: true
+        bytes.extend_from_slice(&99.9f64.to_le_bytes()); // Col 2: 99.9
+
+        // Act
+        let record = RecordSerializer::deserialize(&columns, &bytes)
+            .expect("Deserialization should succeed");
+
+        // Assert
+        assert_eq!(3, record.len());
+        assert_eq!(DataValue::Int(42), record[0]);
+        assert_eq!(DataValue::Boolean(true), record[1]);
+        assert_eq!(DataValue::Float(OrderedFloat(99.9)), record[2]);
     }
 }
