@@ -9,6 +9,7 @@ dashmap = "6.1.0"
 rarmdb_schema_def = { path = "../schema_def" }
 rarmdb_data_model = { path = "../data_model" }
 tokio = { version = "1.49.0", features = ["full"] }
+rust_decimal = "1.41.0"
 
 [dev-dependencies]
 tempfile = "3.25.0"
