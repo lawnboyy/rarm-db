@@ -1228,4 +1228,78 @@ mod tests {
         assert_eq!(1, key.len());
         assert_eq!(DataValue::Int(123), key[0]);
     }
+
+    #[test]
+    fn test_deserialize_primary_key_complex_out_of_order() {
+        // Setup: A complex table where schema order and PK constraint order differ.
+        // Schema order:
+        // 0: name (Varchar, Var)
+        // 1: age (Int, Fixed)
+        // 2: id (Int, Fixed)
+        // 3: is_active (Boolean, Fixed)
+        // 4: rank (Int, Fixed)
+        let mut schema = TableDefinition::new("complex_pk_table".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new(
+                "name".to_string(),
+                PrimitiveDataType::Varchar(255),
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new("age".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new(
+                "is_active".to_string(),
+                PrimitiveDataType::Boolean,
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new("rank".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+
+        // PK constraint order: [id, rank, age]
+        // This means the returned Key must contain values from cols 2, 4, and 1 in that order.
+        schema.add_constraint(
+            Constraint::primary_key(
+                "pk".to_string(),
+                vec!["id".to_string(), "rank".to_string(), "age".to_string()],
+            )
+            .unwrap(),
+        );
+
+        // Construct a full record buffer.
+        // Physical format: [Bitmap] [Fixed Block] [Variable Block]
+        // The fixed block follows schema order for columns that are fixed: age(1), id(2), is_active(3), rank(4).
+        let mut bytes = vec![0u8]; // Null Bitmap (1 byte)
+
+        // --- Fixed Block ---
+        bytes.extend_from_slice(&30i32.to_le_bytes()); // Col 1: age = 30
+        bytes.extend_from_slice(&123i32.to_le_bytes()); // Col 2: id = 123
+        bytes.push(1u8); // Col 3: is_active = true
+        bytes.extend_from_slice(&5i32.to_le_bytes()); // Col 4: rank = 5
+
+        // --- Variable Block ---
+        bytes.extend_from_slice(&5i32.to_le_bytes()); // Col 0: name length = 5
+        bytes.extend_from_slice("Alice".as_bytes()); // Col 0: name data
+
+        // Act: Extract PK
+        let key = RecordSerializer::deserialize_primary_key(&schema, &bytes)
+            .expect("Should extract PK correctly regardless of schema order");
+
+        // Assert: The key should contain (123, 5, 30) based on constraint order [id, rank, age]
+        assert_eq!(3, key.len());
+        assert_eq!(DataValue::Int(123), key[0]); // id
+        assert_eq!(DataValue::Int(5), key[1]); // rank
+        assert_eq!(DataValue::Int(30), key[2]); // age
+    }
 }
