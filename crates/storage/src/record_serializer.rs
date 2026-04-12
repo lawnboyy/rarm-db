@@ -908,4 +908,38 @@ mod tests {
         assert_eq!(DataValue::Boolean(true), record[2]);
         assert_eq!(DataValue::Blob(vec![0xDE, 0xAD]), record[3]);
     }
+
+    #[test]
+    fn test_deserialize_bitmap_overflow() {
+        // Setup: 10 columns to force a 2-byte null bitmap
+        let mut columns = Vec::new();
+        for i in 0..10 {
+            columns.push(
+                ColumnDefinition::new(format!("col_{}", i), PrimitiveDataType::Int, true, None)
+                    .unwrap(),
+            );
+        }
+
+        // Bitmap logic:
+        // Byte 0: Col 0 is NULL (bit 0 = 1), Byte 1: Col 9 is NULL (bit 1 = 1)
+        // Byte 0 binary: 00000001 = 1
+        // Byte 1 binary: 00000010 = 2
+        let mut bytes = vec![1u8, 2u8];
+
+        // 8 non-null Ints (Col 1 through Col 8)
+        for i in 1..9 {
+            bytes.extend_from_slice(&(i as i32).to_le_bytes());
+        }
+
+        // Act
+        let record = RecordSerializer::deserialize(&columns, &bytes)
+            .expect("Should handle multi-byte bitmap");
+
+        // Assert
+        assert_eq!(10, record.len());
+        assert_eq!(DataValue::Null, record[0]);
+        assert_eq!(DataValue::Int(1), record[1]);
+        assert_eq!(DataValue::Int(8), record[8]);
+        assert_eq!(DataValue::Null, record[9]);
+    }
 }
