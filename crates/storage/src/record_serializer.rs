@@ -1,5 +1,6 @@
-use rarmdb_data_model::{DataValue, Record};
-use rarmdb_schema_def::{ColumnDefinition, PrimitiveDataType};
+use rarmdb_data_model::{DataValue, Key, Record, data_value};
+use rarmdb_schema_def::{ColumnDefinition, PrimitiveDataType, TableDefinition};
+use smallvec::{SmallVec, smallvec};
 
 use crate::SerializationError;
 
@@ -160,6 +161,104 @@ impl RecordSerializer {
         }
 
         Ok(Record::from(data_values))
+    }
+
+    pub fn deserialize_primary_key(
+        table_def: &TableDefinition,
+        record_bytes: &[u8],
+    ) -> Result<Key, SerializationError> {
+        let result: Option<Vec<&ColumnDefinition>> = table_def.get_primary_key_columns();
+        if let Some(key_cols) = result {
+            let key_array = key_cols.as_slice();
+
+            return Ok(RecordSerializer::deserialize_key(
+                &table_def.columns,
+                key_array,
+                record_bytes,
+            )
+            .unwrap());
+        }
+
+        Err(SerializationError::PrimaryKeyNotFound)
+    }
+
+    pub fn deserialize_key(
+        record_cols: &[ColumnDefinition],
+        key_cols: &[&ColumnDefinition],
+        record_bytes: &[u8],
+    ) -> Result<Key, SerializationError> {
+        let key_col_count = key_cols.len();
+        let col_count = record_cols.len();
+        let mut row_values = vec![DataValue::Null; key_col_count];
+
+        let null_bitmap_size = (col_count + 7) / 8;
+        let null_bitmap = &record_bytes[..null_bitmap_size];
+
+        let mut current_fixed_offset = null_bitmap_size;
+        let mut current_variable_offset = RecordSerializer::get_variable_length_data_offset(
+            record_cols,
+            null_bitmap,
+            null_bitmap_size,
+        );
+        let mut key_cols_found = 0;
+        for (i, col_def) in record_cols.iter().enumerate() {
+            // Early out if we've found all the key columns...
+            if key_cols_found >= key_col_count {
+                break;
+            }
+
+            let is_key_col = key_cols
+                .iter()
+                .map(|col| &col.name)
+                .any(|n| *n == col_def.name);
+
+            let mut key_col_index = 0;
+            if is_key_col {
+                key_col_index = key_cols
+                    .iter()
+                    .position(|c| c.name == col_def.name)
+                    .unwrap();
+                key_cols_found += 1;
+            }
+
+            if RecordSerializer::is_col_value_null(null_bitmap, i) {
+                if is_key_col {
+                    return Err(SerializationError::NullPrimaryKeyColumnValue);
+                }
+                continue;
+            }
+
+            if col_def.is_fixed_type() {
+                let data_size = col_def.data_type.get_fixed_size().unwrap();
+                if is_key_col {
+                    row_values[key_col_index] =
+                        RecordSerializer::deserialize_fixed_sized_col_value(
+                            col_def,
+                            record_bytes,
+                            &current_fixed_offset,
+                            data_size,
+                        )
+                        .expect("msg");
+                }
+
+                current_fixed_offset += data_size;
+            } else {
+                let variable_data_bytes = &record_bytes[current_variable_offset..];
+                let (data_size_bytes, rest) = variable_data_bytes.split_at(size_of::<i32>());
+                let data_size = i32::from_le_bytes(data_size_bytes.try_into().unwrap());
+                current_variable_offset += size_of::<i32>();
+                if is_key_col {
+                    row_values[key_col_index] =
+                        RecordSerializer::deserialize_variable_sized_col_value(
+                            col_def, rest, data_size,
+                        )
+                        .unwrap();
+                }
+                current_variable_offset += data_size as usize;
+            }
+        }
+
+        Ok(Key::from(row_values))
     }
 
     fn deserialize_col_value(
@@ -346,7 +445,7 @@ impl RecordSerializer {
 mod tests {
     use super::*;
     use rarmdb_data_model::{DataValue, OrderedFloat};
-    use rarmdb_schema_def::PrimitiveDataType;
+    use rarmdb_schema_def::{PrimitiveDataType, TableDefinition, constraint::Constraint};
 
     #[test]
     fn test_serialize_fixed_length_only() {
@@ -941,5 +1040,60 @@ mod tests {
         assert_eq!(DataValue::Int(1), record[1]);
         assert_eq!(DataValue::Int(8), record[8]);
         assert_eq!(DataValue::Null, record[9]);
+    }
+
+    #[test]
+    fn test_deserialize_primary_key() {
+        // Setup: A table where the primary key is composite (id, region_code)
+        let mut schema = TableDefinition::new("multi_pk_table".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new(
+                "name".to_string(),
+                PrimitiveDataType::Varchar(255),
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new(
+                "region_code".to_string(),
+                PrimitiveDataType::Int,
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+
+        // PK on columns 0 and 2
+        schema.add_constraint(
+            Constraint::primary_key(
+                "pk".to_string(),
+                vec!["id".to_string(), "region_code".to_string()],
+            )
+            .unwrap(),
+        );
+
+        // Construct a full record buffer
+        // Null Bitmap (1 byte): 0
+        let mut bytes = vec![0u8];
+        // Fixed: id=500, region_code=99
+        bytes.extend_from_slice(&500i32.to_le_bytes());
+        bytes.extend_from_slice(&99i32.to_le_bytes());
+        // Variable: name="Worker"
+        bytes.extend_from_slice(&6i32.to_le_bytes());
+        bytes.extend_from_slice("Worker".as_bytes());
+
+        // Act: Only extract the primary key
+        let key =
+            RecordSerializer::deserialize_primary_key(&schema, &bytes).expect("Should extract PK");
+
+        // Assert: The key should contain (500, 99)
+        assert_eq!(2, key.len());
+        assert_eq!(DataValue::Int(500), key[0]);
+        assert_eq!(DataValue::Int(99), key[1]);
     }
 }

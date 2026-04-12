@@ -10,6 +10,7 @@ rarmdb_schema_def = { path = "../schema_def" }
 rarmdb_data_model = { path = "../data_model" }
 tokio = { version = "1.49.0", features = ["full"] }
 rust_decimal = "1.41.0"
+smallvec = { version = "1.15.1", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3.25.0"

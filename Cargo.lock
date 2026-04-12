@@ -538,6 +538,7 @@ dependencies = [
  "rarmdb_data_model",
  "rarmdb_schema_def",
  "rust_decimal",
+ "smallvec",
  "tempfile",
  "tokio",
 ]
