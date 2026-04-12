@@ -851,4 +851,61 @@ mod tests {
         assert_eq!(DataValue::Int(10), record[0]);
         assert_eq!(DataValue::Text("Alice".to_string()), record[1]);
     }
+
+    #[test]
+    fn test_deserialize_interleaved_and_nulls() {
+        // Setup: A complex schema with interleaved fixed/variable and nulls
+        // Col 0: id (Fixed, Not Null)
+        // Col 1: name (Var, Nullable)
+        // Col 2: is_active (Fixed, Not Null)
+        // Col 3: bio (Var, Nullable)
+        let columns = vec![
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+            ColumnDefinition::new(
+                "name".to_string(),
+                PrimitiveDataType::Varchar(255),
+                true,
+                None,
+            )
+            .unwrap(),
+            ColumnDefinition::new(
+                "is_active".to_string(),
+                PrimitiveDataType::Boolean,
+                false,
+                None,
+            )
+            .unwrap(),
+            ColumnDefinition::new("bio".to_string(), PrimitiveDataType::Blob(1024), true, None)
+                .unwrap(),
+        ];
+
+        // Data:
+        // Col 0: 100
+        // Col 1: NULL
+        // Col 2: true
+        // Col 3: [0xDE, 0xAD] (length 2)
+
+        // Null Bitmap:
+        // Col 0: 0, Col 1: 1 (NULL), Col 2: 0, Col 3: 0 -> Binary 00000010 = 2u8
+        let mut bytes = vec![2u8];
+
+        // Pass 1: Fixed Section (Only Col 0 and Col 2 have data)
+        bytes.extend_from_slice(&100i32.to_le_bytes()); // Col 0
+        bytes.extend_from_slice(&[1u8]); // Col 2
+
+        // Pass 2: Variable Section (Only Col 3 has data because Col 1 is NULL)
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // Col 3 Length
+        bytes.extend_from_slice(&[0xDE, 0xAD]); // Col 3 Data
+
+        // Act
+        let record = RecordSerializer::deserialize(&columns, &bytes)
+            .expect("Complex deserialization should succeed");
+
+        // Assert
+        assert_eq!(4, record.len());
+        assert_eq!(DataValue::Int(100), record[0]);
+        assert_eq!(DataValue::Null, record[1]);
+        assert_eq!(DataValue::Boolean(true), record[2]);
+        assert_eq!(DataValue::Blob(vec![0xDE, 0xAD]), record[3]);
+    }
 }
