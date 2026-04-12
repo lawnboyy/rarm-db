@@ -1178,4 +1178,54 @@ mod tests {
             _ => panic!("Expected NullPrimaryKeyColumnValue error when PK is null"),
         }
     }
+
+    #[test]
+    fn test_deserialize_primary_key_fixed_last_with_variable_first() {
+        // Setup: A table with variable-length column first, then a fixed column, then the PK.
+        // Col 0: name (Varchar, Not Null)
+        // Col 1: age (Int, Not Null)
+        // Col 2: id (Int, Not Null, Primary Key)
+        let mut schema = TableDefinition::new("fixed_last_table".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new(
+                "name".to_string(),
+                PrimitiveDataType::Varchar(255),
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new("age".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+
+        schema.add_constraint(
+            Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
+        );
+
+        // Construct a full record buffer.
+        // Physical format: [Bitmap] [Fixed (age)] [Fixed (id)] [Variable (name)]
+        let mut bytes = vec![0u8]; // Null Bitmap (no nulls)
+
+        // Fixed: age=30 (4 bytes)
+        bytes.extend_from_slice(&30i32.to_le_bytes());
+
+        // Fixed: id=123 (4 bytes)
+        bytes.extend_from_slice(&123i32.to_le_bytes());
+
+        // Variable: name="Alice" (4 bytes length + 5 bytes data)
+        bytes.extend_from_slice(&5i32.to_le_bytes());
+        bytes.extend_from_slice("Alice".as_bytes());
+
+        // Act: Extract PK
+        let key = RecordSerializer::deserialize_primary_key(&schema, &bytes)
+            .expect("Should extract PK even if it is last in schema");
+
+        // Assert: The key should contain (123)
+        assert_eq!(1, key.len());
+        assert_eq!(DataValue::Int(123), key[0]);
+    }
 }
