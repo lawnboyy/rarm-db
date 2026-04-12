@@ -309,7 +309,7 @@ impl RecordSerializer {
     fn is_col_value_null(null_bitmap: &[u8], index: usize) -> bool {
         let null_bitmap_byte_index = index / 8;
         let null_bitmap_byte = null_bitmap[null_bitmap_byte_index];
-        let bit_in_byte = index & 8;
+        let bit_in_byte = index % 8;
         return (null_bitmap_byte & (1 << bit_in_byte)) != 0;
     }
 }
@@ -757,6 +757,40 @@ mod tests {
         assert_eq!(3, record.len());
         assert_eq!(DataValue::Int(42), record[0]);
         assert_eq!(DataValue::Boolean(true), record[1]);
+        assert_eq!(DataValue::Float(OrderedFloat(99.9)), record[2]);
+    }
+
+    #[test]
+    fn test_deserialize_fixed_length_with_null() {
+        // Setup: A schema with 3 fixed-length columns. The middle column is nullable.
+        let columns = vec![
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+            ColumnDefinition::new(
+                "is_active".to_string(),
+                PrimitiveDataType::Boolean,
+                true,
+                None,
+            )
+            .unwrap(),
+            ColumnDefinition::new("score".to_string(), PrimitiveDataType::Float, false, None)
+                .unwrap(),
+        ];
+
+        // Manually build the bytes as they should appear on disk
+        // Null Bitmap: Col 0 (not null), Col 1 (null), Col 2 (not null) -> Binary 00000010 = 2u8
+        let mut bytes = vec![2u8];
+        bytes.extend_from_slice(&42i32.to_le_bytes()); // Col 0: 42
+        // Col 1 is NULL, so skip data bytes
+        bytes.extend_from_slice(&99.9f64.to_le_bytes()); // Col 2: 99.9
+
+        // Act
+        let record = RecordSerializer::deserialize(&columns, &bytes)
+            .expect("Deserialization should succeed");
+
+        // Assert
+        assert_eq!(3, record.len());
+        assert_eq!(DataValue::Int(42), record[0]);
+        assert_eq!(DataValue::Null, record[1]);
         assert_eq!(DataValue::Float(OrderedFloat(99.9)), record[2]);
     }
 }
