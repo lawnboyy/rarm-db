@@ -129,7 +129,7 @@ impl RecordSerializer {
         let col_count = columns.len();
         let mut data_values = vec![DataValue::Null; col_count];
         let null_bitmap_size = RecordSerializer::get_null_bitmap_size(columns);
-        let null_bitmap = bytes[0..null_bitmap_size].iter().as_slice();
+        let null_bitmap = &bytes[0..null_bitmap_size];
 
         // Track the current fixed sized data offset
         let mut current_fixed_size_offset = null_bitmap_size;
@@ -273,15 +273,10 @@ impl RecordSerializer {
 
             *current_fixed_sized_data_offset += data_size;
 
-            // TODO: Gracefully handle errors...
-            // if let Err(e) = row_value {
-            //     return e;
-            // }
-
             return row_value.unwrap();
         } else {
             // Calculate the ending offset of the variable column data as 4 bytes for the length of the data plus the length of the data.
-            let variable_data_bytes = &bytes[*current_fixed_sized_data_offset..];
+            let variable_data_bytes = &bytes[*current_variable_sized_data_offset..];
             let (data_size_bytes, rest) = variable_data_bytes.split_at(size_of::<i32>());
             let data_size = i32::from_le_bytes(data_size_bytes.try_into().unwrap());
             *current_variable_sized_data_offset += size_of::<i32>();
@@ -1301,5 +1296,36 @@ mod tests {
         assert_eq!(DataValue::Int(123), key[0]); // id
         assert_eq!(DataValue::Int(5), key[1]); // rank
         assert_eq!(DataValue::Int(30), key[2]); // age
+    }
+
+    #[test]
+    fn test_deserialize_variable_length_with_mixed_offsets() {
+        // SETUP: Define a schema where fixed columns come before a variable column.
+        let columns = vec![
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+            ColumnDefinition::new(
+                "name".to_string(),
+                PrimitiveDataType::Varchar(255),
+                false,
+                None,
+            )
+            .unwrap(),
+        ];
+
+        let record = Record::from(vec![
+            DataValue::Int(100),
+            DataValue::Text("Alice".to_string()),
+        ]);
+
+        // Act: Serialize
+        let bytes = RecordSerializer::serialize(&columns, &record).unwrap();
+
+        // Act: Attempt to deserialize (Fixed: Bug caused panic; Now should succeed)
+        let deserialized = RecordSerializer::deserialize(&columns, &bytes)
+            .expect("Deserialization should succeed after the fix");
+
+        // Assert: Verify data integrity
+        assert_eq!(deserialized[0], DataValue::Int(100));
+        assert_eq!(deserialized[1], DataValue::Text("Alice".to_string()));
     }
 }
