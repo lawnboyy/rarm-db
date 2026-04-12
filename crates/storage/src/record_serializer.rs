@@ -1,6 +1,5 @@
-use rarmdb_data_model::{DataValue, Key, Record, data_value};
+use rarmdb_data_model::{DataValue, Key, Record};
 use rarmdb_schema_def::{ColumnDefinition, PrimitiveDataType, TableDefinition};
-use smallvec::{SmallVec, smallvec};
 
 use crate::SerializationError;
 
