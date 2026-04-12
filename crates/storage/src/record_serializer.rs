@@ -167,18 +167,14 @@ impl RecordSerializer {
         record_bytes: &[u8],
     ) -> Result<Key, SerializationError> {
         let result: Option<Vec<&ColumnDefinition>> = table_def.get_primary_key_columns();
-        if let Some(key_cols) = result {
-            let key_array = key_cols.as_slice();
 
-            return Ok(RecordSerializer::deserialize_key(
-                &table_def.columns,
-                key_array,
-                record_bytes,
-            )
-            .unwrap());
+        match result {
+            Some(key_cols) => {
+                let key_array = key_cols.as_slice();
+                RecordSerializer::deserialize_key(&table_def.columns, key_array, record_bytes)
+            }
+            None => Err(SerializationError::PrimaryKeyNotFound),
         }
-
-        Err(SerializationError::PrimaryKeyNotFound)
     }
 
     pub fn deserialize_key(
@@ -1094,5 +1090,92 @@ mod tests {
         assert_eq!(2, key.len());
         assert_eq!(DataValue::Int(500), key[0]);
         assert_eq!(DataValue::Int(99), key[1]);
+    }
+
+    #[test]
+    fn test_deserialize_mixed_primary_key() {
+        // Setup: A table where the primary key is mixed (id: Int, tag: Varchar)
+        let mut schema = TableDefinition::new("mixed_pk_table".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new(
+                "is_active".to_string(),
+                PrimitiveDataType::Boolean,
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new(
+                "tag".to_string(),
+                PrimitiveDataType::Varchar(50),
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+
+        // PK on columns 0 (id) and 2 (tag)
+        schema.add_constraint(
+            Constraint::primary_key("pk".to_string(), vec!["id".to_string(), "tag".to_string()])
+                .unwrap(),
+        );
+
+        // Construct a full record buffer
+        // Null Bitmap (1 byte): 0
+        let mut bytes = vec![0u8];
+
+        // Pass 1: Fixed Section
+        // Col 0: id=777
+        bytes.extend_from_slice(&777i32.to_le_bytes());
+        // Col 1: is_active=true
+        bytes.push(1u8);
+
+        // Pass 2: Variable Section
+        // Col 2: tag="Alpha"
+        bytes.extend_from_slice(&5i32.to_le_bytes()); // Length
+        bytes.extend_from_slice("Alpha".as_bytes()); // Data
+
+        // Act: Extract PK
+        let key = RecordSerializer::deserialize_primary_key(&schema, &bytes)
+            .expect("Should extract mixed PK");
+
+        // Assert
+        assert_eq!(2, key.len());
+        assert_eq!(DataValue::Int(777), key[0]);
+        assert_eq!(DataValue::Text("Alpha".to_string()), key[1]);
+    }
+
+    #[test]
+    fn test_deserialize_primary_key_null_error() {
+        // Setup: A table with a primary key column
+        let mut schema = TableDefinition::new("pk_null_table".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new("data".to_string(), PrimitiveDataType::Int, true, None).unwrap(),
+        );
+
+        schema.add_constraint(
+            Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
+        );
+
+        // Construct a record buffer where the PK (id) is marked as NULL in the bitmap
+        // Null Bitmap (1 byte): Bit 0 (id) is set to 1. Binary: 00000001 = 1
+        let bytes = vec![1u8];
+
+        // Act: Attempt to extract PK
+        let result = RecordSerializer::deserialize_primary_key(&schema, &bytes);
+
+        // Assert: Expect an error because Primary Keys cannot be null
+        assert!(result.is_err());
+        match result {
+            Err(SerializationError::NullPrimaryKeyColumnValue) => (),
+            _ => panic!("Expected NullPrimaryKeyColumnValue error when PK is null"),
+        }
     }
 }
