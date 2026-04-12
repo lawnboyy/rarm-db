@@ -1,6 +1,5 @@
 use rarmdb_data_model::{DataValue, Record};
 use rarmdb_schema_def::{ColumnDefinition, PrimitiveDataType};
-use rust_decimal::Decimal;
 
 use crate::SerializationError;
 
@@ -186,9 +185,18 @@ impl RecordSerializer {
             // }
 
             return row_value.unwrap();
-        }
+        } else {
+            // Calculate the ending offset of the variable column data as 4 bytes for the length of the data plus the length of the data.
+            let variable_data_bytes = &bytes[*current_fixed_sized_data_offset..];
+            let (data_size_bytes, rest) = variable_data_bytes.split_at(size_of::<i32>());
+            let data_size = i32::from_le_bytes(data_size_bytes.try_into().unwrap());
+            *current_variable_sized_data_offset += size_of::<i32>();
+            let row_value =
+                RecordSerializer::deserialize_variable_sized_col_value(col_def, rest, data_size);
+            *current_variable_sized_data_offset += data_size as usize;
 
-        DataValue::Null
+            return row_value.unwrap();
+        }
     }
 
     fn deserialize_fixed_sized_col_value(
@@ -212,7 +220,7 @@ impl RecordSerializer {
                 let val = i64::from_le_bytes(data_value.try_into().unwrap());
                 Ok(DataValue::DateTime(val))
             }
-            PrimitiveDataType::Decimal(l, p) => {
+            PrimitiveDataType::Decimal(_, _) => {
                 let arr: [u8; 16] = data_value
                     .try_into()
                     .map_err(|_| SerializationError::DataTypeMismatch)?;
@@ -227,6 +235,26 @@ impl RecordSerializer {
                 let val = i32::from_le_bytes(data_value.try_into().unwrap());
                 Ok(DataValue::Int(val))
             }
+            _ => Err(SerializationError::DataTypeMismatch),
+        }
+    }
+
+    fn deserialize_variable_sized_col_value(
+        col_def: &ColumnDefinition,
+        bytes: &[u8],
+        data_size: i32,
+    ) -> Result<DataValue, SerializationError> {
+        // Calculate the ending offset of the variable column data as 4 bytes for the length of the data plus the length of the data.
+        let end_offset = data_size as usize;
+
+        // With the start and end offsets of the data, get the data slice to deserialize.
+        let data_bytes = &bytes[..end_offset];
+
+        match col_def.data_type {
+            PrimitiveDataType::Blob(_) => Ok(DataValue::Blob(data_bytes.to_vec())),
+            PrimitiveDataType::Varchar(_) => Ok(DataValue::Text(
+                String::from_utf8(data_bytes.to_vec()).unwrap(),
+            )),
             _ => Err(SerializationError::DataTypeMismatch),
         }
     }
@@ -792,5 +820,35 @@ mod tests {
         assert_eq!(DataValue::Int(42), record[0]);
         assert_eq!(DataValue::Null, record[1]);
         assert_eq!(DataValue::Float(OrderedFloat(99.9)), record[2]);
+    }
+
+    #[test]
+    fn test_deserialize_variable_length() {
+        // Setup: A schema with 1 fixed-length column and 1 variable-length column
+        let columns = vec![
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+            ColumnDefinition::new(
+                "name".to_string(),
+                PrimitiveDataType::Varchar(255),
+                false,
+                None,
+            )
+            .unwrap(),
+        ];
+
+        // Manually build the bytes based on the two-pass architecture
+        let mut bytes = vec![0u8]; // Null Bitmap (no nulls)
+        bytes.extend_from_slice(&10i32.to_le_bytes()); // Pass 1: Fixed-Length (ID=10)
+        bytes.extend_from_slice(&5i32.to_le_bytes()); // Pass 2: Variable-Length (Length=5)
+        bytes.extend_from_slice("Alice".as_bytes()); // Pass 2: Variable-Length (Data)
+
+        // Act
+        let record = RecordSerializer::deserialize(&columns, &bytes)
+            .expect("Deserialization should succeed");
+
+        // Assert
+        assert_eq!(2, record.len());
+        assert_eq!(DataValue::Int(10), record[0]);
+        assert_eq!(DataValue::Text("Alice".to_string()), record[1]);
     }
 }
