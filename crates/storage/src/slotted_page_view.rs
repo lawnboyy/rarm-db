@@ -67,6 +67,13 @@ impl<'a> SlottedPageView<'a> {
     pub fn try_add_record(&mut self, record_data: &[u8], index: u16) -> Result<u16, StorageError> {
         // TODO: Check if there is enough space available on the page for this record...
 
+        let initial_item_count = self.get_item_count();
+        // The insertion index cannot be greater than the item count. Appending a record to the end of
+        // the slot array would mean insertion index == item count.
+        if index > initial_item_count {
+            return Err(StorageError::InvalidSlotIndex);
+        }
+
         // Determine the new data heap offset where the record data will be written to...
         let record_size = record_data.len();
         let data_heap_offset_bytes: [u8; 2] = self.buffer
@@ -90,7 +97,7 @@ impl<'a> SlottedPageView<'a> {
             .copy_from_slice(&(record_size as u16).to_le_bytes());
 
         //  Update the item count
-        let item_count = self.get_item_count() + 1;
+        let item_count = initial_item_count + 1;
         let item_count_bytes = u16::to_le_bytes(item_count);
         self.buffer[ITEM_COUNT_HEADER_OFFSET..ITEM_COUNT_HEADER_OFFSET + 2]
             .copy_from_slice(&item_count_bytes);
@@ -169,6 +176,20 @@ mod tests {
         assert_eq!(
             data, heap_data,
             "Buffer data at calculated offset must match original input"
+        );
+    }
+
+    #[test]
+    fn test_insert_at_invalid_index_fails() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // Cannot insert at index 1 if index 0 is empty
+        let result = page.try_add_record(b"data", 1);
+        assert!(
+            result.is_err(),
+            "Should not allow out-of-bounds insertion index"
         );
     }
 }
