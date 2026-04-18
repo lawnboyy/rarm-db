@@ -1,6 +1,8 @@
 pub const HEADER_SIZE: usize = 32;
-pub const ITEM_COUNT_OFFSET: usize = 8;
-pub const PAGE_TYPE_OFFSET: usize = 28;
+
+pub const ITEM_COUNT_HEADER_OFFSET: usize = 8;
+pub const DATA_HEAP_END_OFFSET_HEADER_OFFSET: usize = 12;
+pub const PAGE_TYPE_HEADER_OFFSET: usize = 28;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

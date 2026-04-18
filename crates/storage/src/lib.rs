@@ -12,6 +12,7 @@ pub mod record_serializer;
 pub mod serialization_error;
 pub mod slot;
 pub mod slotted_page_view;
+pub mod storage_error;
 
 pub use bpm_error::BufferPoolError;
 pub use buffer_pool_manager::BufferPoolManager;
@@ -26,3 +27,4 @@ pub use page_processing_map::PageProcessingMap;
 pub use record_serializer::RecordSerializer;
 pub use serialization_error::SerializationError;
 pub use slotted_page_view::SlottedPageView;
+pub use storage_error::StorageError;
