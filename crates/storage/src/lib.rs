@@ -9,6 +9,7 @@ pub mod page_id;
 pub mod page_processing_map;
 pub mod record_serializer;
 pub mod serialization_error;
+pub mod slot;
 
 pub use bpm_error::BufferPoolError;
 pub use buffer_pool_manager::BufferPoolManager;
