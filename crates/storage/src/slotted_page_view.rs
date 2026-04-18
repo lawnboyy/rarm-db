@@ -27,9 +27,13 @@ impl<'a> SlottedPageView<'a> {
     }
 
     pub fn get_item_count(&self) -> u16 {
-        let buffer_from_item_count_offset = &self.buffer[ITEM_COUNT_OFFSET..];
-        let (item_count_size_bytes, _) = buffer_from_item_count_offset.split_at(size_of::<u16>());
-        u16::from_le_bytes(item_count_size_bytes.try_into().unwrap())
+        let bytes: [u8; 2] = self.buffer[ITEM_COUNT_OFFSET..ITEM_COUNT_OFFSET + 2]
+            .try_into()
+            .expect(
+                "The index of one or more bytes at the item header offset exceed the page size!",
+            );
+
+        u16::from_le_bytes(bytes)
     }
 
     pub fn get_page_type(&self) -> PageType {
