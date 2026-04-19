@@ -38,14 +38,7 @@ impl<'a> SlottedPageView<'a> {
     }
 
     pub fn get_data_start_offset(&self) -> u16 {
-        let bytes: [u8; 2] = self.buffer
-            [PAGE_HEADER_DATA_HEAP_END_OFFSET_OFFSET..PAGE_HEADER_DATA_HEAP_END_OFFSET_OFFSET + 2]
-            .try_into()
-            .expect(
-                "The index of one or more bytes at the item header offset exceed the page size!",
-            );
-
-        u16::from_le_bytes(bytes)
+        self.get_page_header_u16_value(PAGE_HEADER_DATA_HEAP_END_OFFSET_OFFSET)
     }
 
     /// Calculates the free space available on the page using the following:
@@ -66,6 +59,7 @@ impl<'a> SlottedPageView<'a> {
         free_space
     }
 
+    /// Returns the total number of records contained in this page.
     pub fn get_item_count(&self) -> u16 {
         let bytes: [u8; 2] = self.buffer
             [PAGE_HEADER_ITEM_COUNT_OFFSET..PAGE_HEADER_ITEM_COUNT_OFFSET + 2]
@@ -81,6 +75,29 @@ impl<'a> SlottedPageView<'a> {
         PageType::from(self.buffer[PAGE_HEADER_PAGE_TYPE_OFFSET])
     }
 
+    pub fn get_record(&self, index: u16) -> Option<&[u8]> {
+        // Check the item count against the requested index...
+        let item_count = self.get_item_count();
+        if index >= item_count {
+            return None;
+        }
+
+        // Look up the slot at the provided index...
+        let slot_offset = PAGE_HEADER_SIZE + index as usize * SLOT_SIZE;
+        let record_offset_bytes = self.buffer[slot_offset..slot_offset + 2]
+            .try_into()
+            .expect("Could not retrieve record offset from buffer!");
+        let record_offset = u16::from_le_bytes(record_offset_bytes) as usize;
+        let record_size_bytes = self.buffer[slot_offset + 2..slot_offset + 4]
+            .try_into()
+            .expect("Could not retrieve record size from buffer!");
+        let record_size = u16::from_le_bytes(record_size_bytes) as usize;
+
+        Some(&self.buffer[record_offset..record_offset + record_size])
+    }
+
+    /// Attempts to add a new record to the page. If there is insufficient space on the page for
+    /// the given record, a PageFull error is returned. Otherwise, the insertion index is returned.
     pub fn try_add_record(&mut self, record_data: &[u8], index: u16) -> Result<u16, StorageError> {
         // Check if there is enough space available on the page for this record...
         let free_space = self.get_free_space();
@@ -316,5 +333,23 @@ mod tests {
             result.is_err(),
             "Should fail when no space for slot and data"
         );
+    }
+
+    #[test]
+    fn test_get_record_retrieves_correct_data() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        let rec0 = b"Alpha";
+        let rec1 = b"Beta";
+
+        page.try_add_record(rec0, 0).unwrap();
+        page.try_add_record(rec1, 1).unwrap();
+
+        // Act & Assert
+        assert_eq!(Some(rec0.as_slice()), page.get_record(0));
+        assert_eq!(Some(rec1.as_slice()), page.get_record(1));
+        assert_eq!(None, page.get_record(2));
     }
 }
