@@ -106,7 +106,7 @@ impl<'a> SlottedPageView<'a> {
 
     /// Attempts to add a new record to the page. If there is insufficient space on the page for
     /// the given record, a PageFull error is returned. Otherwise, the insertion index is returned.
-    pub fn try_add_record(&mut self, record_data: &[u8], index: u16) -> Result<u16, StorageError> {
+    pub fn try_add_record(&mut self, index: u16, record_data: &[u8]) -> Result<u16, StorageError> {
         // Check if there is enough space available on the page for this record...
         let free_space = self.get_free_space();
         if free_space < record_data.len() {
@@ -168,6 +168,37 @@ impl<'a> SlottedPageView<'a> {
         Ok(index)
     }
 
+    pub fn try_update_record(
+        &mut self,
+        index: u16,
+        record_data: &[u8],
+    ) -> Result<u16, StorageError> {
+        // Use the given index to look up the slot...
+        let (record_offset, orig_record_size) = self.get_slot(index);
+
+        // Where the updated record gets written depends on whether the size changed...
+        let updated_record_size = record_data.len();
+        if updated_record_size <= orig_record_size {
+            // If the size is the same or smaller, write the updated value to the current offset...
+            self.buffer[record_offset..record_offset + orig_record_size]
+                .copy_from_slice(&record_data);
+            // Update the record size if necessary...
+            if updated_record_size < orig_record_size {
+                self.set_slot(index, record_offset as u16, updated_record_size as u16);
+            }
+        } else {
+            // Otherwise, the updated record cannot be written to the current offset as it will overwrite
+            // the adjacent record.
+            // TODO: Check for sufficient free space on the page...
+            // TODO: If there is sufficient free space, calculate the new offset as the data heap
+            // offset minus the updated record size.
+            // TODO: Write the updated record to the new offset.
+            // TODO: Update the slot in the slot array to reflect the new offset and updated record size.
+        }
+
+        Ok(index)
+    }
+
     fn get_page_header_u16_value(&self, offset: usize) -> u16 {
         let page_header_offset_bytes: [u8; 2] = self.buffer[offset..offset + 2]
             .try_into()
@@ -194,6 +225,14 @@ impl<'a> SlottedPageView<'a> {
     fn set_page_header_u16_value(&mut self, offset: usize, value: u16) {
         let value_le_bytes = u16::to_le_bytes(value);
         self.buffer[offset..offset + 2].copy_from_slice(&value_le_bytes);
+    }
+
+    fn set_slot(&mut self, index: u16, record_offset: u16, record_size: u16) {
+        let slot_offset = PAGE_HEADER_SIZE + index as usize * SLOT_SIZE;
+        // Write the record offset...
+        self.buffer[slot_offset..slot_offset + 2].copy_from_slice(&record_offset.to_le_bytes());
+        // Write the record size...
+        self.buffer[slot_offset + 2..slot_offset + 4].copy_from_slice(&record_size.to_le_bytes());
     }
 }
 
@@ -240,7 +279,7 @@ mod tests {
         let data_len = data.len() as u16;
 
         // Act: Add the first record at logical index 0
-        page.try_add_record(data, 0)
+        page.try_add_record(0, data)
             .expect("Should have room for record");
 
         // Assert: Metadata updated
@@ -279,12 +318,12 @@ mod tests {
             page.initialize(PageType::LeafNode);
 
             // 1. Add records to the start and end of the eventual array
-            page.try_add_record(b"Record 0", 0).expect("Insert at 0");
-            page.try_add_record(b"Record 2", 1).expect("Insert at 1");
+            page.try_add_record(0, b"Record 0").expect("Insert at 0");
+            page.try_add_record(1, b"Record 2").expect("Insert at 1");
 
             // 2. Insert into the middle (logical index 1)
             // This forces "Record 2" to shift right in the slot array.
-            page.try_add_record(b"Record 1", 1)
+            page.try_add_record(1, b"Record 1")
                 .expect("Insert in middle");
 
             (page.get_item_count(), page.get_free_space())
@@ -327,7 +366,7 @@ mod tests {
         page.initialize(PageType::LeafNode);
 
         // Cannot insert at index 1 if index 0 is empty
-        let result = page.try_add_record(b"data", 1);
+        let result = page.try_add_record(1, b"data");
         assert!(
             result.is_err(),
             "Should not allow out-of-bounds insertion index"
@@ -344,14 +383,14 @@ mod tests {
         let max_data_size = PAGE_SIZE - PAGE_HEADER_SIZE - SLOT_SIZE;
         let giant_record = vec![0u8; max_data_size];
 
-        page.try_add_record(&giant_record, 0)
+        page.try_add_record(0, &giant_record)
             .expect("Should fit giant record");
 
         // CONTIGUOUS Free space should be 0
         assert_eq!(0, page.get_free_space());
 
         // Attempting to add anything else should fail
-        let result = page.try_add_record(b"extra", 1);
+        let result = page.try_add_record(1, b"extra");
         assert!(
             result.is_err(),
             "Should fail when no space for slot and data"
@@ -367,8 +406,8 @@ mod tests {
         let rec0 = b"Alpha";
         let rec1 = b"Beta";
 
-        page.try_add_record(rec0, 0).unwrap();
-        page.try_add_record(rec1, 1).unwrap();
+        page.try_add_record(0, rec0).unwrap();
+        page.try_add_record(1, rec1).unwrap();
 
         // Act & Assert
         assert_eq!(Some(rec0.as_slice()), page.get_record(0));
@@ -383,9 +422,9 @@ mod tests {
         page.initialize(PageType::LeafNode);
 
         // 1. Setup: Add 3 records
-        page.try_add_record(b"Record A", 0).unwrap();
-        page.try_add_record(b"Record B", 1).unwrap();
-        page.try_add_record(b"Record C", 2).unwrap();
+        page.try_add_record(0, b"Record A").unwrap();
+        page.try_add_record(1, b"Record B").unwrap();
+        page.try_add_record(2, b"Record C").unwrap();
 
         let free_space_before = page.get_free_space();
 
@@ -407,5 +446,29 @@ mod tests {
         assert_eq!(Some(b"Record C".as_slice()), page.get_record(1));
         // Slot 2 should now be empty/invalid
         assert_eq!(None, page.get_record(2));
+    }
+
+    #[test]
+    fn test_update_record_in_place() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Setup: Add a record
+        page.try_add_record(0, b"Old Data")
+            .expect("Initial add failed");
+        let free_space_after_add = page.get_free_space();
+
+        // 2. Act: Update with new data of exact same length
+        let result = page.try_update_record(0, b"New Data");
+
+        // 3. Assert
+        assert!(result.is_ok(), "Update of same-size record should succeed");
+        assert_eq!(Some(b"New Data".as_slice()), page.get_record(0));
+        assert_eq!(
+            free_space_after_add,
+            page.get_free_space(),
+            "Free space should remain identical for in-place update"
+        );
     }
 }
