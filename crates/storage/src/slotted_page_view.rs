@@ -37,6 +37,22 @@ impl<'a> SlottedPageView<'a> {
             .copy_from_slice(&u16::to_le_bytes(PAGE_SIZE as u16))
     }
 
+    pub fn delete_record(&mut self, index: u16) {
+        let slot_offset = PAGE_HEADER_SIZE + index as usize * SLOT_SIZE;
+        let item_count = self.get_item_count();
+        let num_bytes_to_shift = item_count as usize * SLOT_SIZE - (index as usize + 1) * SLOT_SIZE;
+
+        if num_bytes_to_shift > 0 {
+            let source_offset = slot_offset + SLOT_SIZE;
+            self.buffer.copy_within(
+                source_offset..source_offset + num_bytes_to_shift,
+                slot_offset,
+            );
+        }
+
+        self.set_page_header_u16_value(PAGE_HEADER_ITEM_COUNT_OFFSET, item_count - 1);
+    }
+
     pub fn get_data_start_offset(&self) -> u16 {
         self.get_page_header_u16_value(PAGE_HEADER_DATA_HEAP_END_OFFSET_OFFSET)
     }
@@ -83,15 +99,7 @@ impl<'a> SlottedPageView<'a> {
         }
 
         // Look up the slot at the provided index...
-        let slot_offset = PAGE_HEADER_SIZE + index as usize * SLOT_SIZE;
-        let record_offset_bytes = self.buffer[slot_offset..slot_offset + 2]
-            .try_into()
-            .expect("Could not retrieve record offset from buffer!");
-        let record_offset = u16::from_le_bytes(record_offset_bytes) as usize;
-        let record_size_bytes = self.buffer[slot_offset + 2..slot_offset + 4]
-            .try_into()
-            .expect("Could not retrieve record size from buffer!");
-        let record_size = u16::from_le_bytes(record_size_bytes) as usize;
+        let (record_offset, record_size) = self.get_slot(index);
 
         Some(&self.buffer[record_offset..record_offset + record_size])
     }
@@ -166,6 +174,21 @@ impl<'a> SlottedPageView<'a> {
             .expect("Page header value offset exceeded the page size!");
         let page_header_value = u16::from_le_bytes(page_header_offset_bytes);
         page_header_value
+    }
+
+    fn get_slot(&self, index: u16) -> (usize, usize) {
+        // Look up the slot at the provided index...
+        let slot_offset = PAGE_HEADER_SIZE + index as usize * SLOT_SIZE;
+        let record_offset_bytes = self.buffer[slot_offset..slot_offset + 2]
+            .try_into()
+            .expect("Could not retrieve record offset from buffer!");
+        let record_offset = u16::from_le_bytes(record_offset_bytes) as usize;
+        let record_size_bytes = self.buffer[slot_offset + 2..slot_offset + 4]
+            .try_into()
+            .expect("Could not retrieve record size from buffer!");
+        let record_size = u16::from_le_bytes(record_size_bytes) as usize;
+
+        (record_offset, record_size)
     }
 
     fn set_page_header_u16_value(&mut self, offset: usize, value: u16) {
@@ -350,6 +373,39 @@ mod tests {
         // Act & Assert
         assert_eq!(Some(rec0.as_slice()), page.get_record(0));
         assert_eq!(Some(rec1.as_slice()), page.get_record(1));
+        assert_eq!(None, page.get_record(2));
+    }
+
+    #[test]
+    fn test_delete_record_shifts_slots_left() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Setup: Add 3 records
+        page.try_add_record(b"Record A", 0).unwrap();
+        page.try_add_record(b"Record B", 1).unwrap();
+        page.try_add_record(b"Record C", 2).unwrap();
+
+        let free_space_before = page.get_free_space();
+
+        // 2. Act: Delete the middle record (index 1)
+        page.delete_record(1);
+
+        // 3. Assert: Item count is updated
+        assert_eq!(2, page.get_item_count());
+
+        // 4. Assert: Free space increased by exactly SLOT_SIZE (4 bytes)
+        // Note: The record data for "Record B" stays in the heap as garbage
+        // until compaction, so only the slot array space is reclaimed here.
+        assert_eq!(free_space_before + SLOT_SIZE, page.get_free_space());
+
+        // 5. Assert: Verify logical order after shifting
+        // Slot 0 should still be A
+        assert_eq!(Some(b"Record A".as_slice()), page.get_record(0));
+        // Slot 1 should now be C (shifted left)
+        assert_eq!(Some(b"Record C".as_slice()), page.get_record(1));
+        // Slot 2 should now be empty/invalid
         assert_eq!(None, page.get_record(2));
     }
 }
