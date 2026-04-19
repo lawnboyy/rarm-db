@@ -1,4 +1,4 @@
-pub const SIZE: u16 = (size_of::<u16>() + size_of::<u16>()) as u16;
+pub const SLOT_SIZE: usize = size_of::<u16>() + size_of::<u16>();
 
 pub struct Slot {
     pub record_offset: u16,
