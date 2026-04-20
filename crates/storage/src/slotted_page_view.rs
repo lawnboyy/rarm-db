@@ -189,11 +189,30 @@ impl<'a> SlottedPageView<'a> {
         } else {
             // Otherwise, the updated record cannot be written to the current offset as it will overwrite
             // the adjacent record.
-            // TODO: Check for sufficient free space on the page...
-            // TODO: If there is sufficient free space, calculate the new offset as the data heap
+            // TODO: Return a page full error if there is insufficient space...
+            // If there is sufficient free space, calculate the new offset as the data heap
             // offset minus the updated record size.
-            // TODO: Write the updated record to the new offset.
-            // TODO: Update the slot in the slot array to reflect the new offset and updated record size.
+            let data_heap_offset =
+                self.get_page_header_u16_value(PAGE_HEADER_DATA_HEAP_END_OFFSET_OFFSET);
+            let new_data_heap_offset = data_heap_offset - updated_record_size as u16;
+
+            // Write the updated record to the new offset.
+            self.buffer[new_data_heap_offset as usize
+                ..new_data_heap_offset as usize + updated_record_size]
+                .copy_from_slice(record_data);
+
+            // Update the slot in the slot array to reflect the new offset and updated record size.
+            self.set_slot(
+                index,
+                new_data_heap_offset as u16,
+                updated_record_size as u16,
+            );
+
+            // Update the data heap offset in the page header.
+            self.set_page_header_u16_value(
+                PAGE_HEADER_DATA_HEAP_END_OFFSET_OFFSET,
+                new_data_heap_offset,
+            );
         }
 
         Ok(index)
@@ -469,6 +488,38 @@ mod tests {
             free_space_after_add,
             page.get_free_space(),
             "Free space should remain identical for in-place update"
+        );
+    }
+
+    #[test]
+    fn test_update_record_relocates_when_larger() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Setup: Add a small record
+        page.try_add_record(0, b"Small")
+            .expect("Initial add failed");
+        let free_space_after_add = page.get_free_space();
+
+        // 2. Act: Update with much larger data
+        let new_data = b"Much Larger Record Data";
+        let result = page.try_update_record(0, new_data);
+
+        // 3. Assert
+        assert!(
+            result.is_ok(),
+            "Update with larger data should succeed when space is available"
+        );
+        assert_eq!(Some(new_data.as_slice()), page.get_record(0));
+
+        // 4. Assert: Free space should decrease by the EXACT length of the new record.
+        // The old record "Small" (5 bytes) becomes garbage in the heap, and a fresh 23 bytes
+        // are consumed from the end of the heap.
+        assert_eq!(
+            free_space_after_add - new_data.len(),
+            page.get_free_space(),
+            "Free space should decrease by the length of the relocated record"
         );
     }
 }
