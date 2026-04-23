@@ -109,7 +109,7 @@ impl<'a> SlottedPageView<'a> {
     pub fn try_add_record(&mut self, index: u16, record_data: &[u8]) -> Result<u16, StorageError> {
         // Check if there is enough space available on the page for this record...
         let free_space = self.get_free_space();
-        if free_space < record_data.len() {
+        if free_space < record_data.len() + SLOT_SIZE {
             return Err(StorageError::PageFull);
         }
 
@@ -189,7 +189,12 @@ impl<'a> SlottedPageView<'a> {
         } else {
             // Otherwise, the updated record cannot be written to the current offset as it will overwrite
             // the adjacent record.
-            // TODO: Return a page full error if there is insufficient space...
+            // Return a page full error if there is insufficient space...
+            let free_space = self.get_free_space();
+            if updated_record_size > free_space {
+                return Err(StorageError::PageFull);
+            }
+
             // If there is sufficient free space, calculate the new offset as the data heap
             // offset minus the updated record size.
             let data_heap_offset =
@@ -520,6 +525,94 @@ mod tests {
             free_space_after_add - new_data.len(),
             page.get_free_space(),
             "Free space should decrease by the length of the relocated record"
+        );
+    }
+
+    #[test]
+    fn test_update_record_fails_when_relocation_exceeds_space() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Add an initial record (Small)
+        page.try_add_record(0, b"Small").unwrap();
+
+        // 2. Fill almost the entire page with another record
+        let remaining_usable = page.get_free_space() - SLOT_SIZE;
+        let filler = vec![0u8; remaining_usable - 10]; // Leave exactly 10 bytes of free space
+        page.try_add_record(1, &filler).expect("Should fit filler");
+
+        assert_eq!(10, page.get_free_space());
+
+        // 3. Attempt to update Record 0 with 20 bytes (Relocation required)
+        let result = page.try_update_record(0, &[0u8; 20]);
+
+        // 4. Assert: Should return PageFull because 20 > 10
+        assert!(matches!(result, Err(StorageError::PageFull)));
+
+        // Verify original data is still intact
+        assert_eq!(Some(b"Small".as_slice()), page.get_record(0));
+    }
+
+    #[test]
+    fn test_update_record_at_exact_remaining_space_limit() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Add an initial record
+        page.try_add_record(0, b"A").unwrap();
+
+        // 2. Fill the page such that there are exactly 20 bytes of contiguous free space left
+        // Note: we subtract SLOT_SIZE here because try_add_record consumes both data and a new slot entry.
+        let remaining_for_filler = page.get_free_space() - SLOT_SIZE - 20;
+        let filler = vec![0u8; remaining_for_filler];
+        page.try_add_record(1, &filler).unwrap();
+
+        let free_before = page.get_free_space();
+        assert_eq!(20, free_before);
+
+        // 3. Act: Update record 0 with exactly 20 bytes.
+        // Since 20 is larger than "A" (1 byte), it triggers relocation.
+        // It should succeed because 20 is exactly equal to the available free_space.
+        let update_result = page.try_update_record(0, &[1u8; 20]);
+
+        // 4. Assert
+        assert!(
+            update_result.is_ok(),
+            "Update with exact remaining space should succeed"
+        );
+        assert_eq!(
+            0,
+            page.get_free_space(),
+            "Free space should be completely exhausted"
+        );
+
+        let retrieved = page.get_record(0).unwrap();
+        assert_eq!(20, retrieved.len());
+        assert_eq!(&[1u8; 20], retrieved);
+    }
+
+    #[test]
+    fn test_update_record_fails_one_byte_over_limit() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Setup: add a record
+        page.try_add_record(0, b"Data").unwrap();
+
+        // 2. Get current free space
+        let free = page.get_free_space();
+
+        // 3. Act: Attempt update with data that is exactly 1 byte larger than free space
+        let larger_than_free = vec![0u8; free + 1];
+        let result = page.try_update_record(0, &larger_than_free);
+
+        // 4. Assert
+        assert!(
+            matches!(result, Err(StorageError::PageFull)),
+            "Should fail when update is 1 byte larger than capacity"
         );
     }
 }
