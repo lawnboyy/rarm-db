@@ -937,4 +937,93 @@ mod tests {
             "DataStartOffset should point to the start of the repacked contiguous block"
         );
     }
+
+    #[test]
+    fn test_compact_reclaims_space_after_relocation_updates() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Add a small record
+        page.try_add_record(0, b"Original").unwrap();
+        let initial_total_free = page.get_free_space();
+
+        // 2. Update to a much larger size to force relocation
+        // "Original" (8 bytes) stays as garbage, 20 new bytes written at end.
+        page.try_update_record(0, &[1u8; 20]).unwrap();
+
+        let free_before = page.get_free_space();
+        let contiguous_before = page.get_free_space_contiguous();
+        assert!(
+            contiguous_before < free_before,
+            "Updates should have created garbage holes"
+        );
+
+        // 3. Act: Compact
+        page.compact();
+
+        // 4. Assert
+        assert_eq!(page.get_free_space(), page.get_free_space_contiguous());
+        // The expected total free space after the 20-byte update (from initial)
+        // remains the same, but contiguous should now match it.
+        assert_eq!(
+            initial_total_free - (20 - 8),
+            page.get_free_space_contiguous()
+        );
+
+        let data = page.get_record(0).unwrap();
+        assert_eq!(data, &[1u8; 20]);
+    }
+
+    #[test]
+    fn test_compact_after_all_records_deleted_resets_heap() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        page.try_add_record(0, b"Data A").unwrap();
+        page.try_add_record(1, b"Data B").unwrap();
+
+        // Delete everything
+        page.delete_record(0);
+        page.delete_record(0);
+
+        assert_eq!(0, page.get_item_count());
+        assert!(
+            page.get_data_start_offset() < PAGE_SIZE as u16,
+            "Heap should still be physically occupied by garbage"
+        );
+
+        // Act
+        page.compact();
+
+        // Assert
+        assert_eq!(
+            PAGE_SIZE as u16,
+            page.get_data_start_offset(),
+            "Compacting empty page should reset DataStartOffset to PAGE_SIZE"
+        );
+        assert_eq!(
+            PAGE_SIZE - PAGE_HEADER_SIZE,
+            page.get_free_space_contiguous()
+        );
+    }
+
+    #[test]
+    fn test_compact_on_already_contiguous_page_is_noop() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        page.try_add_record(0, b"Contiguous").unwrap();
+        let data_start_before = page.get_data_start_offset();
+        let free_before = page.get_free_space_contiguous();
+
+        // Act
+        page.compact();
+
+        // Assert: No change
+        assert_eq!(data_start_before, page.get_data_start_offset());
+        assert_eq!(free_before, page.get_free_space_contiguous());
+    }
 }
