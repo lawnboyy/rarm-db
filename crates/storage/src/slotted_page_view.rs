@@ -66,7 +66,7 @@ impl<'a> SlottedPageView<'a> {
 
     /// Calculates the free space available on the page using the following:
     /// Free Space = Page Size - Page Header - Slot Array - Data Heap
-    pub fn get_free_space(&self) -> usize {
+    pub fn get_free_space_contiguous(&self) -> usize {
         // Get the slot array size...
         let item_count = self.get_item_count();
         let slot_array_size = item_count as usize * SLOT_SIZE;
@@ -115,7 +115,7 @@ impl<'a> SlottedPageView<'a> {
     /// the given record, a PageFull error is returned. Otherwise, the insertion index is returned.
     pub fn try_add_record(&mut self, index: u16, record_data: &[u8]) -> Result<u16, StorageError> {
         // Check if there is enough space available on the page for this record...
-        let free_space = self.get_free_space();
+        let free_space = self.get_free_space_contiguous();
         if free_space < record_data.len() + SLOT_SIZE {
             return Err(StorageError::PageFull);
         }
@@ -202,7 +202,7 @@ impl<'a> SlottedPageView<'a> {
             // Otherwise, the updated record cannot be written to the current offset as it will overwrite
             // the adjacent record.
             // Return a page full error if there is insufficient space...
-            let free_space = self.get_free_space();
+            let free_space = self.get_free_space_contiguous();
             if updated_record_size > free_space {
                 return Err(StorageError::PageFull);
             }
@@ -294,7 +294,10 @@ mod tests {
 
         // Free space should be PAGE_SIZE (8192) - HEADER_SIZE (32) = 8160
         // because there are 0 slots and 0 records.
-        assert_eq!(PAGE_SIZE - PAGE_HEADER_SIZE, page.get_free_space());
+        assert_eq!(
+            PAGE_SIZE - PAGE_HEADER_SIZE,
+            page.get_free_space_contiguous()
+        );
 
         let mut buffer2 = [0u8; PAGE_SIZE];
         let mut page2 = SlottedPageView::new(&mut buffer2);
@@ -362,7 +365,7 @@ mod tests {
             page.try_add_record(1, b"Record 1")
                 .expect("Insert in middle");
 
-            (page.get_item_count(), page.get_free_space())
+            (page.get_item_count(), page.get_free_space_contiguous())
         };
 
         assert_eq!(3, item_count);
@@ -423,7 +426,7 @@ mod tests {
             .expect("Should fit giant record");
 
         // CONTIGUOUS Free space should be 0
-        assert_eq!(0, page.get_free_space());
+        assert_eq!(0, page.get_free_space_contiguous());
 
         // Attempting to add anything else should fail
         let result = page.try_add_record(1, b"extra");
@@ -460,7 +463,7 @@ mod tests {
         // 1. Setup: Add a record
         page.try_add_record(0, b"Old Data")
             .expect("Initial add failed");
-        let free_space_after_add = page.get_free_space();
+        let free_space_after_add = page.get_free_space_contiguous();
 
         // 2. Act: Update with new data of exact same length
         let result = page.try_update_record(0, b"New Data");
@@ -470,7 +473,7 @@ mod tests {
         assert_eq!(Some(b"New Data".as_slice()), page.get_record(0));
         assert_eq!(
             free_space_after_add,
-            page.get_free_space(),
+            page.get_free_space_contiguous(),
             "Free space should remain identical for in-place update"
         );
     }
@@ -484,7 +487,7 @@ mod tests {
         // 1. Setup: Add a small record
         page.try_add_record(0, b"Small")
             .expect("Initial add failed");
-        let free_space_after_add = page.get_free_space();
+        let free_space_after_add = page.get_free_space_contiguous();
 
         // 2. Act: Update with much larger data
         let new_data = b"Much Larger Record Data";
@@ -502,7 +505,7 @@ mod tests {
         // are consumed from the end of the heap.
         assert_eq!(
             free_space_after_add - new_data.len(),
-            page.get_free_space(),
+            page.get_free_space_contiguous(),
             "Free space should decrease by the length of the relocated record"
         );
     }
@@ -517,11 +520,11 @@ mod tests {
         page.try_add_record(0, b"Small").unwrap();
 
         // 2. Fill almost the entire page with another record
-        let remaining_usable = page.get_free_space() - SLOT_SIZE;
+        let remaining_usable = page.get_free_space_contiguous() - SLOT_SIZE;
         let filler = vec![0u8; remaining_usable - 10]; // Leave exactly 10 bytes of free space
         page.try_add_record(1, &filler).expect("Should fit filler");
 
-        assert_eq!(10, page.get_free_space());
+        assert_eq!(10, page.get_free_space_contiguous());
 
         // 3. Attempt to update Record 0 with 20 bytes (Relocation required)
         let result = page.try_update_record(0, &[0u8; 20]);
@@ -544,11 +547,11 @@ mod tests {
 
         // 2. Fill the page such that there are exactly 20 bytes of contiguous free space left
         // Note: we subtract SLOT_SIZE here because try_add_record consumes both data and a new slot entry.
-        let remaining_for_filler = page.get_free_space() - SLOT_SIZE - 20;
+        let remaining_for_filler = page.get_free_space_contiguous() - SLOT_SIZE - 20;
         let filler = vec![0u8; remaining_for_filler];
         page.try_add_record(1, &filler).unwrap();
 
-        let free_before = page.get_free_space();
+        let free_before = page.get_free_space_contiguous();
         assert_eq!(20, free_before);
 
         // 3. Act: Update record 0 with exactly 20 bytes.
@@ -563,7 +566,7 @@ mod tests {
         );
         assert_eq!(
             0,
-            page.get_free_space(),
+            page.get_free_space_contiguous(),
             "Free space should be completely exhausted"
         );
 
@@ -582,7 +585,7 @@ mod tests {
         page.try_add_record(0, b"Data").unwrap();
 
         // 2. Get current free space
-        let free = page.get_free_space();
+        let free = page.get_free_space_contiguous();
 
         // 3. Act: Attempt update with data that is exactly 1 byte larger than free space
         let larger_than_free = vec![0u8; free + 1];
@@ -603,7 +606,7 @@ mod tests {
 
         // 1. Setup: Add a record with 10 bytes
         page.try_add_record(0, b"0123456789").unwrap();
-        let free_space_after_add = page.get_free_space();
+        let free_space_after_add = page.get_free_space_contiguous();
 
         // 2. Act: Update with a smaller record (4 bytes)
         let new_data = b"Abcd";
@@ -617,7 +620,7 @@ mod tests {
         assert_eq!(4, record_size);
 
         // 5. Free space should not change (heap data is overwritten but not moved or reclaimed)
-        assert_eq!(free_space_after_add, page.get_free_space());
+        assert_eq!(free_space_after_add, page.get_free_space_contiguous());
     }
 
     #[test]
@@ -648,7 +651,7 @@ mod tests {
         page.try_add_record(1, b"Record B").unwrap();
         page.try_add_record(2, b"Record C").unwrap();
 
-        let free_space_before = page.get_free_space();
+        let free_space_before = page.get_free_space_contiguous();
 
         // 2. Act: Delete the middle record (index 1)
         page.delete_record(1);
@@ -659,7 +662,10 @@ mod tests {
         // 4. Assert: Free space increased by exactly SLOT_SIZE (4 bytes)
         // Note: The record data for "Record B" stays in the heap as garbage
         // until compaction, so only the slot array space is reclaimed here.
-        assert_eq!(free_space_before + SLOT_SIZE, page.get_free_space());
+        assert_eq!(
+            free_space_before + SLOT_SIZE,
+            page.get_free_space_contiguous()
+        );
 
         // 5. Assert: Verify logical order after shifting
         // Slot 0 should still be A
@@ -704,7 +710,7 @@ mod tests {
 
         // 1. Setup: Add 1 record
         page.try_add_record(0, b"Stay").unwrap();
-        let initial_free_space = page.get_free_space();
+        let initial_free_space = page.get_free_space_contiguous();
 
         // 2. Act: Attempt to delete an out-of-bounds index (index 1 when only 0 exists)
         // This test identifies the current underflow issue.
@@ -712,7 +718,7 @@ mod tests {
 
         // 3. Assert: State should remain unchanged
         assert_eq!(1, page.get_item_count());
-        assert_eq!(initial_free_space, page.get_free_space());
+        assert_eq!(initial_free_space, page.get_free_space_contiguous());
         assert_eq!(Some(b"Stay".as_slice()), page.get_record(0));
     }
 
