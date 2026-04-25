@@ -180,6 +180,11 @@ impl<'a> SlottedPageView<'a> {
         index: u16,
         record_data: &[u8],
     ) -> Result<u16, StorageError> {
+        let item_count = self.get_item_count();
+        if index >= item_count {
+            return Err(StorageError::InvalidSlotIndex);
+        }
+
         // Use the given index to look up the slot...
         let (record_offset, orig_record_size) = self.get_slot(index);
 
@@ -613,6 +618,23 @@ mod tests {
 
         // 5. Free space should not change (heap data is overwritten but not moved or reclaimed)
         assert_eq!(free_space_after_add, page.get_free_space());
+    }
+
+    #[test]
+    fn test_update_record_invalid_index_returns_error() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Setup: Add 1 record
+        page.try_add_record(0, b"Original").unwrap();
+
+        // 2. Act: Attempt to update index 1 (does not exist)
+        let result = page.try_update_record(1, b"New Data");
+
+        // 3. Assert: Should return InvalidSlotIndex
+        // Note: This test will currently likely PANIC until you add the check in implementation
+        assert!(matches!(result, Err(StorageError::InvalidSlotIndex)));
     }
 
     #[test]
