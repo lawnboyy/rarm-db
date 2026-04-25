@@ -715,4 +715,42 @@ mod tests {
         assert_eq!(initial_free_space, page.get_free_space());
         assert_eq!(Some(b"Stay".as_slice()), page.get_record(0));
     }
+
+    #[test]
+    fn test_interleaved_inserts_and_deletes() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // Sequence mimicking B-Tree rebalancing/shifts
+
+        // 1. Initial Fill: [A, B, C]
+        page.try_add_record(0, b"A").unwrap();
+        page.try_add_record(1, b"B").unwrap();
+        page.try_add_record(2, b"C").unwrap();
+
+        // 2. Delete from middle: [A, C]
+        page.delete_record(1);
+        assert_eq!(2, page.get_item_count());
+        assert_eq!(Some(b"A".as_slice()), page.get_record(0));
+        assert_eq!(Some(b"C".as_slice()), page.get_record(1));
+
+        // 3. Insert into middle: [A, D, C]
+        page.try_add_record(1, b"D").unwrap();
+        assert_eq!(3, page.get_item_count());
+        assert_eq!(Some(b"A".as_slice()), page.get_record(0));
+        assert_eq!(Some(b"D".as_slice()), page.get_record(1));
+        assert_eq!(Some(b"C".as_slice()), page.get_record(2));
+
+        // 4. Update the "shifted" tail: [A, D, CCC]
+        page.try_update_record(2, b"CCC").unwrap();
+        assert_eq!(Some(b"CCC".as_slice()), page.get_record(2));
+
+        // 5. Final Delete of all: []
+        page.delete_record(0);
+        page.delete_record(0);
+        page.delete_record(0);
+        assert_eq!(0, page.get_item_count());
+        assert_eq!(None, page.get_record(0));
+    }
 }
