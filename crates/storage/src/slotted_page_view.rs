@@ -38,8 +38,15 @@ impl<'a> SlottedPageView<'a> {
     }
 
     pub fn delete_record(&mut self, index: u16) {
-        let slot_offset = PAGE_HEADER_SIZE + index as usize * SLOT_SIZE;
         let item_count = self.get_item_count();
+
+        // TODO: Should the method return an error in this case?
+        // Ignore invalid index...
+        if index >= item_count {
+            return;
+        }
+
+        let slot_offset = PAGE_HEADER_SIZE + index as usize * SLOT_SIZE;
         let num_bytes_to_shift = item_count as usize * SLOT_SIZE - (index as usize + 1) * SLOT_SIZE;
 
         if num_bytes_to_shift > 0 {
@@ -440,39 +447,6 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_record_shifts_slots_left() {
-        let mut buffer = [0u8; PAGE_SIZE];
-        let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
-
-        // 1. Setup: Add 3 records
-        page.try_add_record(0, b"Record A").unwrap();
-        page.try_add_record(1, b"Record B").unwrap();
-        page.try_add_record(2, b"Record C").unwrap();
-
-        let free_space_before = page.get_free_space();
-
-        // 2. Act: Delete the middle record (index 1)
-        page.delete_record(1);
-
-        // 3. Assert: Item count is updated
-        assert_eq!(2, page.get_item_count());
-
-        // 4. Assert: Free space increased by exactly SLOT_SIZE (4 bytes)
-        // Note: The record data for "Record B" stays in the heap as garbage
-        // until compaction, so only the slot array space is reclaimed here.
-        assert_eq!(free_space_before + SLOT_SIZE, page.get_free_space());
-
-        // 5. Assert: Verify logical order after shifting
-        // Slot 0 should still be A
-        assert_eq!(Some(b"Record A".as_slice()), page.get_record(0));
-        // Slot 1 should now be C (shifted left)
-        assert_eq!(Some(b"Record C".as_slice()), page.get_record(1));
-        // Slot 2 should now be empty/invalid
-        assert_eq!(None, page.get_record(2));
-    }
-
-    #[test]
     fn test_update_record_in_place() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
@@ -614,5 +588,84 @@ mod tests {
             matches!(result, Err(StorageError::PageFull)),
             "Should fail when update is 1 byte larger than capacity"
         );
+    }
+
+    #[test]
+    fn test_delete_record_shifts_slots_left() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Setup: Add 3 records
+        page.try_add_record(0, b"Record A").unwrap();
+        page.try_add_record(1, b"Record B").unwrap();
+        page.try_add_record(2, b"Record C").unwrap();
+
+        let free_space_before = page.get_free_space();
+
+        // 2. Act: Delete the middle record (index 1)
+        page.delete_record(1);
+
+        // 3. Assert: Item count is updated
+        assert_eq!(2, page.get_item_count());
+
+        // 4. Assert: Free space increased by exactly SLOT_SIZE (4 bytes)
+        // Note: The record data for "Record B" stays in the heap as garbage
+        // until compaction, so only the slot array space is reclaimed here.
+        assert_eq!(free_space_before + SLOT_SIZE, page.get_free_space());
+
+        // 5. Assert: Verify logical order after shifting
+        // Slot 0 should still be A
+        assert_eq!(Some(b"Record A".as_slice()), page.get_record(0));
+        // Slot 1 should now be C (shifted left)
+        assert_eq!(Some(b"Record C".as_slice()), page.get_record(1));
+        // Slot 2 should now be empty/invalid
+        assert_eq!(None, page.get_record(2));
+    }
+
+    #[test]
+    fn test_delete_first_record_shifts_all_others() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Setup: Add 3 records
+        page.try_add_record(0, b"Record 0").unwrap();
+        page.try_add_record(1, b"Record 1").unwrap();
+        page.try_add_record(2, b"Record 2").unwrap();
+
+        // 2. Act: Delete the very first record (index 0)
+        page.delete_record(0);
+
+        // 3. Assert: Item count is now 2
+        assert_eq!(2, page.get_item_count());
+
+        // 4. Assert: Verify logical order after shifting
+        // Record 1 should now be at logical index 0
+        assert_eq!(Some(b"Record 1".as_slice()), page.get_record(0));
+        // Record 2 should now be at logical index 1
+        assert_eq!(Some(b"Record 2".as_slice()), page.get_record(1));
+        // Index 2 should now be invalid
+        assert_eq!(None, page.get_record(2));
+    }
+
+    #[test]
+    fn test_delete_record_invalid_index_is_noop() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Setup: Add 1 record
+        page.try_add_record(0, b"Stay").unwrap();
+        let initial_free_space = page.get_free_space();
+
+        // 2. Act: Attempt to delete an out-of-bounds index (index 1 when only 0 exists)
+        // This test identifies the current underflow issue.
+        page.delete_record(1);
+
+        // 3. Assert: State should remain unchanged
+        assert_eq!(1, page.get_item_count());
+        assert_eq!(initial_free_space, page.get_free_space());
+        assert_eq!(Some(b"Stay".as_slice()), page.get_record(0));
     }
 }
