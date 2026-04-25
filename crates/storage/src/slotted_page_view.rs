@@ -64,7 +64,34 @@ impl<'a> SlottedPageView<'a> {
         self.get_page_header_u16_value(PAGE_HEADER_DATA_HEAP_END_OFFSET_OFFSET)
     }
 
-    /// Calculates the free space available on the page using the following:
+    /// Calculates the total logical free space available on the page, including any
+    /// fragmented space between records (e.g. as the result of deleting a record
+    /// or updated a record with a smaller total size).
+    pub fn get_free_space(&self) -> usize {
+        // Get the slot array size...
+        let item_count = self.get_item_count();
+        let slot_array_size = item_count as usize * SLOT_SIZE;
+
+        // Get the data heap size...
+        // Data Heap Size = Page Size - Data Heap Offset
+        let data_heap_offset =
+            self.get_page_header_u16_value(PAGE_HEADER_DATA_HEAP_END_OFFSET_OFFSET);
+        let data_heap_size = PAGE_SIZE - data_heap_offset as usize;
+
+        let free_space_contiguous = PAGE_SIZE - PAGE_HEADER_SIZE - slot_array_size - data_heap_size;
+
+        // Determine the total space used by the records, which may differ from the data heap size due to
+        // soft deletes and record updates.
+        let mut total_used_data_space = 0;
+        for i in 0..item_count {
+            total_used_data_space += self.get_slot(i).1;
+        }
+
+        free_space_contiguous + (data_heap_size - total_used_data_space)
+    }
+
+    /// Calculates the free space available in the contiguous free block between
+    /// the slot array and the data block on the page using the following:
     /// Free Space = Page Size - Page Header - Slot Array - Data Heap
     pub fn get_free_space_contiguous(&self) -> usize {
         // Get the slot array size...
@@ -758,5 +785,50 @@ mod tests {
         page.delete_record(0);
         assert_eq!(0, page.get_item_count());
         assert_eq!(None, page.get_record(0));
+    }
+
+    #[test]
+    fn test_get_total_free_space_with_fragmentation() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Add three records of 10 bytes each
+        // Each add uses: 10 bytes (data) + 4 bytes (slot) = 14 bytes
+        page.try_add_record(0, b"0123456789").unwrap();
+        page.try_add_record(1, b"0123456789").unwrap();
+        page.try_add_record(2, b"0123456789").unwrap();
+
+        let initial_contiguous = page.get_free_space_contiguous();
+
+        // 2. Delete the middle record (index 1)
+        // This removes the 4-byte slot from the array, but the 10-byte record
+        // remains in the heap as garbage.
+        page.delete_record(1);
+
+        // 3. Verify fragmentation
+        // Contiguous free space should only increase by the 4 bytes reclaimed from the slot array.
+        assert_eq!(
+            initial_contiguous + SLOT_SIZE,
+            page.get_free_space_contiguous()
+        );
+
+        // Total free space should now include the 10-byte "hole" plus the 4 bytes from the slot.
+        // We calculate expected total based on PAGE_SIZE - HEADER - (Remaining Items * SlotSize) - (Remaining Data)
+        let expected_total = PAGE_SIZE - PAGE_HEADER_SIZE - (2 * SLOT_SIZE) - (2 * 10);
+        assert_eq!(expected_total, page.get_free_space());
+
+        // 4. Update a record to relocate it
+        // Updating record 0 (10 bytes) to 20 bytes.
+        // 20 > 10, so it will be relocated to the end of the current data heap.
+        // The old 10 bytes become garbage.
+        page.try_update_record(0, &[1u8; 20]).unwrap();
+
+        // Contiguous space decreases by the FULL size of the new record (20 bytes).
+        // Total free space decreases because we added 20 bytes of new data, but
+        // conceptually it only changed by the difference of what's logically alive.
+        let expected_total_after_relocate =
+            PAGE_SIZE - PAGE_HEADER_SIZE - (2 * SLOT_SIZE) - (10 + 20);
+        assert_eq!(expected_total_after_relocate, page.get_free_space());
     }
 }
