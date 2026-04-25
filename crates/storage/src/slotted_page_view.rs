@@ -187,7 +187,7 @@ impl<'a> SlottedPageView<'a> {
         let updated_record_size = record_data.len();
         if updated_record_size <= orig_record_size {
             // If the size is the same or smaller, write the updated value to the current offset...
-            self.buffer[record_offset..record_offset + orig_record_size]
+            self.buffer[record_offset..record_offset + updated_record_size]
                 .copy_from_slice(&record_data);
             // Update the record size if necessary...
             if updated_record_size < orig_record_size {
@@ -588,6 +588,31 @@ mod tests {
             matches!(result, Err(StorageError::PageFull)),
             "Should fail when update is 1 byte larger than capacity"
         );
+    }
+
+    #[test]
+    fn test_update_record_smaller_size_updates_slot_length() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Setup: Add a record with 10 bytes
+        page.try_add_record(0, b"0123456789").unwrap();
+        let free_space_after_add = page.get_free_space();
+
+        // 2. Act: Update with a smaller record (4 bytes)
+        let new_data = b"Abcd";
+        page.try_update_record(0, new_data).unwrap();
+
+        // 3. Assert: Data is retrieved correctly
+        assert_eq!(Some(new_data.as_slice()), page.get_record(0));
+
+        // 4. Verify physical slot length was actually reduced in the metadata
+        let (_, record_size) = page.get_slot(0);
+        assert_eq!(4, record_size);
+
+        // 5. Free space should not change (heap data is overwritten but not moved or reclaimed)
+        assert_eq!(free_space_after_add, page.get_free_space());
     }
 
     #[test]
