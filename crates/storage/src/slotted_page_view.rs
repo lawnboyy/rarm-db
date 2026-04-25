@@ -37,6 +37,64 @@ impl<'a> SlottedPageView<'a> {
             .copy_from_slice(&u16::to_le_bytes(PAGE_SIZE as u16))
     }
 
+    /// Rewrites the existing record data heap as a contiguous block to eliminate fragmentation. If
+    /// the current free space is equivalent to the contiguous free space block, then no action is
+    /// performed.
+    pub fn compact(&mut self) {
+        // If the contiguous free space is the same as the total free space, then there is no
+        // fragmentation and no compaction is needed.
+        // TODO: This is slightly inefficient because the 2 free space methods are making some of the
+        // same calculations and header value lookups.
+        let free_space = self.get_free_space();
+        if free_space == self.get_free_space_contiguous() {
+            return;
+        }
+
+        // Pull the records into a vector to re-write to the data heap.
+        let item_count = self.get_item_count();
+        // Calculate the size of the compacted data block by taking the total page space minus the page
+        // header and slot array and subtract the total free space.
+        let total_free_and_data_space =
+            PAGE_SIZE - PAGE_HEADER_SIZE - item_count as usize * SLOT_SIZE;
+        let total_data_heap_size = total_free_and_data_space - free_space;
+        let mut compacted_data_block: Vec<u8> = Vec::with_capacity(total_data_heap_size);
+        // Loop through the slot array and fetch each record, writing it to the data heap vector.
+        for i in 0..item_count {
+            let record_data = self.get_record(i).unwrap();
+            compacted_data_block.extend_from_slice(record_data);
+        }
+
+        // Now write the updated data block, one record at a time and update the slot offsets.
+        // Initialize our current data heap offset to the end of the page.
+        let mut current_data_heap_offset = PAGE_SIZE;
+        let mut current_data_buffer_offset = 0;
+        for i in 0..item_count {
+            let (_, record_size) = self.get_slot(i);
+            let record_data = &compacted_data_block
+                [current_data_buffer_offset..current_data_buffer_offset + record_size];
+
+            current_data_buffer_offset += record_size;
+
+            // Write the record to the data heap at the new offset...
+            current_data_heap_offset -= record_size;
+            self.buffer[current_data_heap_offset as usize
+                ..current_data_heap_offset as usize + record_size]
+                .copy_from_slice(record_data);
+
+            self.set_slot(i, current_data_heap_offset as u16, record_size as u16);
+        }
+
+        // Zero out the contiguous block for debugging purposes...
+        let free_space_offset = PAGE_HEADER_SIZE + item_count as usize * SLOT_SIZE;
+        self.buffer[free_space_offset..free_space_offset + free_space].fill(0);
+
+        // Update the data heap offset in the header.
+        self.set_page_header_u16_value(
+            PAGE_HEADER_DATA_HEAP_END_OFFSET_OFFSET,
+            current_data_heap_offset as u16,
+        );
+    }
+
     pub fn delete_record(&mut self, index: u16) {
         let item_count = self.get_item_count();
 
@@ -830,5 +888,53 @@ mod tests {
         let expected_total_after_relocate =
             PAGE_SIZE - PAGE_HEADER_SIZE - (2 * SLOT_SIZE) - (10 + 20);
         assert_eq!(expected_total_after_relocate, page.get_free_space());
+    }
+
+    #[test]
+    fn test_compact_reclaims_fragmented_space() {
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page = SlottedPageView::new(&mut buffer);
+        page.initialize(PageType::LeafNode);
+
+        // 1. Setup: Add 3 records
+        page.try_add_record(0, b"Record 0").unwrap();
+        page.try_add_record(1, b"Record 1").unwrap();
+        page.try_add_record(2, b"Record 2").unwrap();
+
+        // 2. Fragment the page by deleting the middle record
+        page.delete_record(1);
+
+        let free_before = page.get_free_space();
+        let contiguous_before = page.get_free_space_contiguous();
+
+        // Assert fragmentation exists
+        assert!(
+            contiguous_before < free_before,
+            "Page must be fragmented before compaction"
+        );
+
+        // 3. Act: Call compact
+        page.compact();
+
+        // 4. Assert: Contiguous free space should now equal total free space
+        assert_eq!(
+            page.get_free_space(),
+            page.get_free_space_contiguous(),
+            "Compaction should eliminate all internal fragmentation"
+        );
+
+        // 5. Assert: Data integrity maintained
+        assert_eq!(Some(b"Record 0".as_slice()), page.get_record(0));
+        assert_eq!(Some(b"Record 2".as_slice()), page.get_record(1));
+        assert_eq!(None, page.get_record(2));
+
+        // 6. Verify physical repacking: The records should be at the very end of the page
+        // ItemCount is 2. Total record data is 8 + 8 = 16 bytes.
+        // New DataStart should be PAGE_SIZE - 16.
+        assert_eq!(
+            (PAGE_SIZE - 16) as u16,
+            page.get_data_start_offset(),
+            "DataStartOffset should point to the start of the repacked contiguous block"
+        );
     }
 }
