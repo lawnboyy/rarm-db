@@ -100,29 +100,29 @@ mod tests {
                 "Should find key 30 at index 1"
             );
 
-            // // Scenario B: Missing key in middle (Gap)
-            // let key_20 = Key::from(DataValue::Int(20));
-            // assert_eq!(
-            //     Err(1),
-            //     leaf_view.find_key(&key_20, &schema),
-            //     "Key 20 should be inserted at index 1"
-            // );
+            // Scenario B: Missing key in middle (Gap)
+            let key_20 = Key::from(DataValue::Int(20));
+            assert_eq!(
+                Err(1),
+                leaf_view.find_key(&key_20, &schema),
+                "Key 20 should be inserted at index 1"
+            );
 
-            // // Scenario C: Missing key at start
-            // let key_5 = Key::from(DataValue::Int(5));
-            // assert_eq!(
-            //     Err(0),
-            //     leaf_view.find_key(&key_5, &schema),
-            //     "Key 5 should be inserted at index 0"
-            // );
+            // Scenario C: Missing key at start
+            let key_5 = Key::from(DataValue::Int(5));
+            assert_eq!(
+                Err(0),
+                leaf_view.find_key(&key_5, &schema),
+                "Key 5 should be inserted at index 0"
+            );
 
-            // // Scenario D: Missing key at end
-            // let key_100 = Key::from(DataValue::Int(100));
-            // assert_eq!(
-            //     Err(2),
-            //     leaf_view.find_key(&key_100, &schema),
-            //     "Key 100 should be inserted at index 2"
-            // );
+            // Scenario D: Missing key at end
+            let key_100 = Key::from(DataValue::Int(100));
+            assert_eq!(
+                Err(2),
+                leaf_view.find_key(&key_100, &schema),
+                "Key 100 should be inserted at index 2"
+            );
         } else {
             panic!("Node should be a Leaf");
         }
