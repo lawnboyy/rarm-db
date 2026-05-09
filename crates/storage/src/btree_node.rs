@@ -18,7 +18,6 @@ mod tests {
     use rarmdb_schema_def::{ColumnDefinition, PrimitiveDataType, TableDefinition};
 
     use super::*;
-    use crate::RecordSerializer;
     use crate::page::PageType;
     use crate::page_id::PAGE_SIZE;
     use crate::slotted_page_view::SlottedPageView;

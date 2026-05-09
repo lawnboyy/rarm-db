@@ -26,7 +26,6 @@ pub use page::PageType;
 pub use page_guard::PageReadGuard;
 pub use page_id::PageId;
 pub use page_processing_map::PageProcessingMap;
-pub use record_serializer::RecordSerializer;
 pub use serialization_error::SerializationError;
 pub use slotted_page_view::SlottedPageView;
 pub use storage_error::StorageError;
