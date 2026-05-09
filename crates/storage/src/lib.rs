@@ -1,4 +1,5 @@
 pub mod bpm_error;
+pub mod btree_node;
 pub mod buffer_pool_manager;
 pub mod disk_manager;
 pub mod evictor;
@@ -15,6 +16,7 @@ pub mod slotted_page_view;
 pub mod storage_error;
 
 pub use bpm_error::BufferPoolError;
+pub use btree_node::BTreeNode;
 pub use buffer_pool_manager::BufferPoolManager;
 pub use disk_manager::DiskManager;
 pub use evictor::Evictor;
