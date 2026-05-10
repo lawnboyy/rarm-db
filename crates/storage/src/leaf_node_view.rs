@@ -1,7 +1,7 @@
-use rarmdb_data_model::Key;
+use rarmdb_data_model::{Key, Record};
 use rarmdb_schema_def::TableDefinition;
 
-use crate::{SlottedPageView, record_serializer};
+use crate::{SlottedPageView, StorageError, record_serializer, slot};
 
 pub struct LeafNodeView<'a> {
     pub page_view: SlottedPageView<'a>,
@@ -37,5 +37,29 @@ impl<'a> LeafNodeView<'a> {
         }
 
         Err(low as usize)
+    }
+
+    pub fn insert_record(
+        &mut self,
+        record: &Record,
+        table_def: &TableDefinition,
+    ) -> Result<u16, StorageError> {
+        // TODO: First check if there is enough available space...
+        // Extract the primary key from this record...
+        let primary_key = &record.get_primary_key(table_def);
+        // Find the slot index where this record will be inserted...
+        let slot_index = self.find_key(primary_key, table_def);
+
+        // The key does not exist, so the slot index is the insertion point...
+        if let Err(insertion_slot) = slot_index {
+            // Serialize the record...
+            let record_bytes = &record_serializer::serialize(&table_def.columns, record).unwrap();
+            return self
+                .page_view
+                .try_add_record(insertion_slot as u16, record_bytes);
+        }
+
+        // A record with this primary key already exists, so it's a duplicate key...
+        Err(StorageError::DuplicateKey)
     }
 }

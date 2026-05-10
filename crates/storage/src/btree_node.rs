@@ -22,8 +22,8 @@ mod tests {
     use super::*;
     use crate::page::PageType;
     use crate::page_id::PAGE_SIZE;
-    use crate::record_serializer;
     use crate::slotted_page_view::SlottedPageView;
+    use crate::{StorageError, record_serializer};
 
     #[test]
     fn test_btree_node_dispatch() {
@@ -123,6 +123,88 @@ mod tests {
                 leaf_view.find_key(&key_100, &schema),
                 "Key 100 should be inserted at index 2"
             );
+        } else {
+            panic!("Node should be a Leaf");
+        }
+    }
+
+    #[test]
+    fn test_leaf_node_insert_record() {
+        // 1. Setup Schema
+        let mut schema = TableDefinition::new("users".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new(
+                "name".to_string(),
+                PrimitiveDataType::Varchar(50),
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+        schema.add_constraint(
+            Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
+        );
+
+        // 2. Setup Page and Node
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page_view = SlottedPageView::new(&mut buffer);
+        page_view.initialize(PageType::LeafNode);
+        let mut node = BTreeNode::new(page_view);
+
+        if let BTreeNode::Leaf(ref mut leaf_view) = node {
+            // 3. Insert records in UNSORTED arrival order
+            // Insert ID 30
+            let rec30 = Record::from(vec![DataValue::Int(30), DataValue::Text("Bob".to_string())]);
+            leaf_view
+                .insert_record(&rec30, &schema)
+                .expect("Insert 30 should succeed");
+
+            // Insert ID 10 (Should go to index 0, shifting 30 to index 1)
+            let rec10 = Record::from(vec![
+                DataValue::Int(10),
+                DataValue::Text("Alice".to_string()),
+            ]);
+            leaf_view
+                .insert_record(&rec10, &schema)
+                .expect("Insert 10 should succeed");
+
+            // Insert ID 20 (Should go to index 1, shifting 30 to index 2)
+            let rec20 = Record::from(vec![
+                DataValue::Int(20),
+                DataValue::Text("Charlie".to_string()),
+            ]);
+            leaf_view
+                .insert_record(&rec20, &schema)
+                .expect("Insert 20 should succeed");
+
+            // 4. Assert Logical Sorted Order
+            assert_eq!(3, leaf_view.page_view.get_item_count());
+
+            // Index 0: ID 10
+            let val0 = leaf_view.page_view.get_record(0).unwrap();
+            let key0 = record_serializer::deserialize_primary_key(&schema, val0).unwrap();
+            assert_eq!(Key::from(DataValue::Int(10)), key0);
+
+            // Index 1: ID 20
+            let val1 = leaf_view.page_view.get_record(1).unwrap();
+            let key1 = record_serializer::deserialize_primary_key(&schema, val1).unwrap();
+            assert_eq!(Key::from(DataValue::Int(20)), key1);
+
+            // Index 2: ID 30
+            let val2 = leaf_view.page_view.get_record(2).unwrap();
+            let key2 = record_serializer::deserialize_primary_key(&schema, val2).unwrap();
+            assert_eq!(Key::from(DataValue::Int(30)), key2);
+
+            // 5. Assert Duplicate Key Error
+            let duplicate = Record::from(vec![
+                DataValue::Int(20),
+                DataValue::Text("Clone".to_string()),
+            ]);
+            let result = leaf_view.insert_record(&duplicate, &schema);
+            assert!(matches!(result, Err(StorageError::DuplicateKey)));
         } else {
             panic!("Node should be a Leaf");
         }
