@@ -387,7 +387,7 @@ impl BufferPoolManager {
         Ok(())
     }
 
-    /// Checks for any in-flight fetches and waits.
+    /// Checks if this page is being flushed and waits for it to complete.
     async fn wait_for_page_flush(&self, page_id: PageId) -> Result<(), BufferPoolError> {        
         let io_processing_guard = self.page_io_processing.lock().unwrap();
         let io_processing_result = io_processing_guard.flushes.get(&page_id);
