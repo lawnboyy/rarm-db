@@ -1,7 +1,12 @@
 use rarmdb_data_model::{Key, Record};
 use rarmdb_schema_def::TableDefinition;
 
-use crate::{PageId, SlottedPageView, StorageError, btree::ops, record_serializer};
+use crate::{
+    PageId, SlottedPageView, StorageError,
+    btree::ops,
+    page::{TYPE_SPECIFIC_POINTER_1_OFFSET, TYPE_SPECIFIC_POINTER_2_OFFSET},
+    record_serializer,
+};
 
 pub struct LeafNodeView<'a> {
     pub page_id: PageId,
@@ -11,6 +16,20 @@ pub struct LeafNodeView<'a> {
 impl<'a> LeafNodeView<'a> {
     pub fn new(page_id: PageId, page_view: SlottedPageView<'a>) -> Self {
         LeafNodeView { page_id, page_view }
+    }
+
+    pub fn get_next_leaf_index(&self) -> Option<u32> {
+        let val = self
+            .page_view
+            .get_page_header_u32_value(TYPE_SPECIFIC_POINTER_1_OFFSET);
+        if val == 0 { None } else { Some(val) }
+    }
+
+    pub fn get_prev_leaf_index(&self) -> Option<u32> {
+        let val = self
+            .page_view
+            .get_page_header_u32_value(TYPE_SPECIFIC_POINTER_2_OFFSET);
+        if val == 0 { None } else { Some(val) }
     }
 
     /// Performs a binary search of the records contained in the leaf node and returns the
@@ -43,6 +62,20 @@ impl<'a> LeafNodeView<'a> {
 
         // A record with this primary key already exists, so it's a duplicate key...
         Err(StorageError::DuplicateKey)
+    }
+
+    pub(crate) fn set_next_leaf_index(&self, page_index: Option<u32>) {}
+
+    pub(crate) fn set_prev_leaf_index(&self, page_index: Option<u32>) {}
+
+    pub(crate) fn split_and_insert(
+        &self,
+        record: &Record,
+        right_sibling: &mut LeafNodeView,
+        orig_right_sibling: Option<&mut LeafNodeView>,
+        schema: &TableDefinition,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::PageFull)
     }
 
     pub fn update_record(

@@ -1,3 +1,5 @@
+use rarmdb_data_model::Record;
+
 use crate::{
     PageType,
     page::{
@@ -318,6 +320,14 @@ impl<'a> SlottedPageView<'a> {
         }
 
         Ok(index)
+    }
+
+    pub(crate) fn get_page_header_u32_value(&self, offset: usize) -> u32 {
+        let page_header_offset_bytes: [u8; 4] = self.buffer[offset..offset + 4]
+            .try_into()
+            .expect("Page header value offset exceeded the page size!");
+        let page_header_value = u32::from_le_bytes(page_header_offset_bytes);
+        page_header_value
     }
 
     fn get_page_header_u16_value(&self, offset: usize) -> u16 {
