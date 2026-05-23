@@ -260,4 +260,65 @@ mod tests {
             panic!("Node should be a Leaf");
         }
     }
+
+    #[test]
+    fn test_leaf_node_update_record() {
+        // 1. Setup Schema
+        let mut schema = TableDefinition::new("users".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new(
+                "name".to_string(),
+                PrimitiveDataType::Varchar(50),
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+        schema.add_constraint(
+            Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
+        );
+
+        // 2. Setup Page and Node
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page_view = SlottedPageView::new(&mut buffer);
+        page_view.initialize(PageType::LeafNode);
+        let mut node = BTreeNode::new(page_view);
+
+        if let BTreeNode::Leaf(ref mut leaf_view) = node {
+            // 3. Insert initial record (ID=10, Name="Alice")
+            let initial_rec = Record::from(vec![
+                DataValue::Int(10),
+                DataValue::Text("Alice".to_string()),
+            ]);
+            leaf_view
+                .insert_record(&initial_rec, &schema)
+                .expect("Initial insert should succeed");
+
+            // 4. Construct updated record (Same PK: 10, updated Name: "Alicia")
+            let updated_rec = Record::from(vec![
+                DataValue::Int(10),
+                DataValue::Text("Alicia".to_string()),
+            ]);
+
+            // Act
+            leaf_view
+                .update_record(&updated_rec, &schema)
+                .expect("Update should succeed");
+
+            // Assert: Verify only one record remains, but its value has changed
+            assert_eq!(1, leaf_view.page_view.get_item_count());
+            let val = leaf_view.page_view.get_record(0).unwrap();
+            let record = record_serializer::deserialize(&schema.columns, val).unwrap();
+            assert_eq!(
+                DataValue::Text("Alicia".to_string()),
+                record[1],
+                "Name should be updated to 'Alicia'"
+            );
+        } else {
+            panic!("Node should be a Leaf");
+        }
+    }
 }

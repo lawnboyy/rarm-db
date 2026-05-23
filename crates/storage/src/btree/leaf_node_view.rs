@@ -43,4 +43,23 @@ impl<'a> LeafNodeView<'a> {
         // A record with this primary key already exists, so it's a duplicate key...
         Err(StorageError::DuplicateKey)
     }
+
+    pub fn update_record(
+        &mut self,
+        record: &Record,
+        table_def: &TableDefinition,
+    ) -> Result<u16, StorageError> {
+        // Extract the primary key of the record...
+        let key = record.get_primary_key(table_def);
+        let slot_result = ops::find_key(&self.page_view, &key, table_def);
+
+        if let Ok(slot_index) = slot_result {
+            let record_data = record_serializer::serialize(&table_def.columns, record)
+                .expect("There was an error serializing the record!");
+            self.page_view
+                .try_update_record(slot_index as u16, Vec::as_slice(&record_data))
+        } else {
+            Err(StorageError::InvalidSlotIndex)
+        }
+    }
 }
