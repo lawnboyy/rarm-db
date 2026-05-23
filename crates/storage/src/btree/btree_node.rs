@@ -1,4 +1,4 @@
-use crate::{SlottedPageView, btree::LeafNodeView};
+use crate::{PageId, SlottedPageView, btree::LeafNodeView};
 
 pub enum BTreeNode<'a> {
     Internal(SlottedPageView<'a>),
@@ -6,9 +6,9 @@ pub enum BTreeNode<'a> {
 }
 
 impl<'a> BTreeNode<'a> {
-    pub fn new(slotted_page_view: SlottedPageView<'a>) -> Self {
+    pub fn new(page_id: PageId, slotted_page_view: SlottedPageView<'a>) -> Self {
         // TODO: Implement matching based on node type
-        let leaf = LeafNodeView::new(slotted_page_view);
+        let leaf = LeafNodeView::new(page_id, slotted_page_view);
         BTreeNode::Leaf(leaf)
     }
 }
@@ -33,7 +33,7 @@ mod tests {
 
         // Act: Wrap the physical view in a logical B-Tree node
         // This is the first goal for your implementation.
-        let node = BTreeNode::new(page_view);
+        let node = BTreeNode::new(PageId::new(0, 0), page_view);
 
         // Assert: Ensure it dispatched to the Leaf variant
         match node {
@@ -87,7 +87,7 @@ mod tests {
         page_view.try_add_record(1, &rec1).unwrap();
 
         // Wrap in Node
-        let node = BTreeNode::new(page_view);
+        let node = BTreeNode::new(PageId::new(0, 0), page_view);
 
         // 4. Act & Assert: Search scenarios on the logical LeafNodeView
         if let BTreeNode::Leaf(leaf_view) = node {
@@ -152,7 +152,7 @@ mod tests {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page_view = SlottedPageView::new(&mut buffer);
         page_view.initialize(PageType::LeafNode);
-        let mut node = BTreeNode::new(page_view);
+        let mut node = BTreeNode::new(PageId::new(0, 0), page_view);
 
         if let BTreeNode::Leaf(ref mut leaf_view) = node {
             // 3. Insert records in UNSORTED arrival order
@@ -234,7 +234,7 @@ mod tests {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page_view = SlottedPageView::new(&mut buffer);
         page_view.initialize(PageType::LeafNode);
-        let mut node = BTreeNode::new(page_view);
+        let mut node = BTreeNode::new(PageId::new(0, 0), page_view);
 
         if let BTreeNode::Leaf(ref mut leaf_view) = node {
             // 3. Construct a giant record that takes up almost the entire page capacity
@@ -285,7 +285,7 @@ mod tests {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page_view = SlottedPageView::new(&mut buffer);
         page_view.initialize(PageType::LeafNode);
-        let mut node = BTreeNode::new(page_view);
+        let mut node = BTreeNode::new(PageId::new(0, 0), page_view);
 
         if let BTreeNode::Leaf(ref mut leaf_view) = node {
             // 3. Insert initial record (ID=10, Name="Alice")
@@ -346,7 +346,7 @@ mod tests {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page_view = SlottedPageView::new(&mut buffer);
         page_view.initialize(PageType::LeafNode);
-        let mut node = BTreeNode::new(page_view);
+        let mut node = BTreeNode::new(PageId::new(0, 0), page_view);
 
         if let BTreeNode::Leaf(ref mut leaf_view) = node {
             // 3. Insert initial record (ID=10, Name="Alice")

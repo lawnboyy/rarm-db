@@ -1,15 +1,16 @@
 use rarmdb_data_model::{Key, Record};
 use rarmdb_schema_def::TableDefinition;
 
-use crate::{SlottedPageView, StorageError, btree::ops, record_serializer};
+use crate::{PageId, SlottedPageView, StorageError, btree::ops, record_serializer};
 
 pub struct LeafNodeView<'a> {
+    pub page_id: PageId,
     pub page_view: SlottedPageView<'a>,
 }
 
 impl<'a> LeafNodeView<'a> {
-    pub fn new(page_view: SlottedPageView<'a>) -> Self {
-        LeafNodeView { page_view }
+    pub fn new(page_id: PageId, page_view: SlottedPageView<'a>) -> Self {
+        LeafNodeView { page_id, page_view }
     }
 
     /// Performs a binary search of the records contained in the leaf node and returns the
