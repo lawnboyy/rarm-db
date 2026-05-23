@@ -321,4 +321,55 @@ mod tests {
             panic!("Node should be a Leaf");
         }
     }
+
+    #[test]
+    fn test_leaf_node_update_record_not_found() {
+        // 1. Setup Schema
+        let mut schema = TableDefinition::new("users".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new(
+                "name".to_string(),
+                PrimitiveDataType::Varchar(50),
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+        schema.add_constraint(
+            Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
+        );
+
+        // 2. Setup Page and Node
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page_view = SlottedPageView::new(&mut buffer);
+        page_view.initialize(PageType::LeafNode);
+        let mut node = BTreeNode::new(page_view);
+
+        if let BTreeNode::Leaf(ref mut leaf_view) = node {
+            // 3. Insert initial record (ID=10, Name="Alice")
+            let initial_rec = Record::from(vec![
+                DataValue::Int(10),
+                DataValue::Text("Alice".to_string()),
+            ]);
+            leaf_view
+                .insert_record(&initial_rec, &schema)
+                .expect("Initial insert should succeed");
+
+            // 4. Construct a record with a non-existent key (ID=20)
+            let non_existent_rec =
+                Record::from(vec![DataValue::Int(20), DataValue::Text("Bob".to_string())]);
+
+            // Act & Assert: Expect KeyNotFound error
+            let result = leaf_view.update_record(&non_existent_rec, &schema);
+            assert!(
+                matches!(result, Err(StorageError::KeyNotFound)),
+                "Expected KeyNotFound error when updating a non-existent record"
+            );
+        } else {
+            panic!("Node should be a Leaf");
+        }
+    }
 }

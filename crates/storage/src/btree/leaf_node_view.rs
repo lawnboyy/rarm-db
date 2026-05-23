@@ -59,7 +59,7 @@ impl<'a> LeafNodeView<'a> {
             self.page_view
                 .try_update_record(slot_index as u16, Vec::as_slice(&record_data))
         } else {
-            Err(StorageError::InvalidSlotIndex)
+            Err(StorageError::KeyNotFound)
         }
     }
 }
