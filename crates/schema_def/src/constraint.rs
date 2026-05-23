@@ -22,6 +22,14 @@ pub enum Constraint {
 }
 
 impl Constraint {
+    pub fn col_names(&self) -> Option<&Vec<String>> {
+        match self {
+            Constraint::PrimaryKey { column_names, .. } => Some(column_names),
+            Constraint::UniqueKey { column_names, .. } => Some(column_names),
+            _ => None,
+        }
+    }
+
     /// Creates a new Primary Key constraint.
     pub fn primary_key(name: String, column_names: Vec<String>) -> Result<Self, SchemaError> {
         Self::validate_key(&name, &column_names)?;

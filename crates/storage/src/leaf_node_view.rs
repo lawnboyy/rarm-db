@@ -1,7 +1,7 @@
 use rarmdb_data_model::{Key, Record};
 use rarmdb_schema_def::TableDefinition;
 
-use crate::{SlottedPageView, StorageError, record_serializer, slot};
+use crate::{SlottedPageView, StorageError, record_serializer};
 
 pub struct LeafNodeView<'a> {
     pub page_view: SlottedPageView<'a>,
@@ -44,7 +44,6 @@ impl<'a> LeafNodeView<'a> {
         record: &Record,
         table_def: &TableDefinition,
     ) -> Result<u16, StorageError> {
-        // TODO: First check if there is enough available space...
         // Extract the primary key from this record...
         let primary_key = &record.get_primary_key(table_def);
         // Find the slot index where this record will be inserted...
@@ -54,6 +53,8 @@ impl<'a> LeafNodeView<'a> {
         if let Err(insertion_slot) = slot_index {
             // Serialize the record...
             let record_bytes = &record_serializer::serialize(&table_def.columns, record).unwrap();
+
+            // The slotted page will return an error if there is insufficient space to insert this record.
             return self
                 .page_view
                 .try_add_record(insertion_slot as u16, record_bytes);

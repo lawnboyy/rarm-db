@@ -209,4 +209,55 @@ mod tests {
             panic!("Node should be a Leaf");
         }
     }
+
+    #[test]
+    fn test_leaf_node_insert_page_full() {
+        // 1. Setup Schema
+        let mut schema = TableDefinition::new("users".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new(
+                "bio".to_string(),
+                PrimitiveDataType::Varchar(8000),
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+        schema.add_constraint(
+            Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
+        );
+
+        // 2. Setup Page and Node
+        let mut buffer = [0u8; PAGE_SIZE];
+        let mut page_view = SlottedPageView::new(&mut buffer);
+        page_view.initialize(PageType::LeafNode);
+        let mut node = BTreeNode::new(page_view);
+
+        if let BTreeNode::Leaf(ref mut leaf_view) = node {
+            // 3. Construct a giant record that takes up almost the entire page capacity
+            // Page size is 8192. Header is 32. Max remaining is 8160.
+            let giant_bio = "X".repeat(8100);
+            let giant_record = Record::from(vec![DataValue::Int(1), DataValue::Text(giant_bio)]);
+
+            leaf_view
+                .insert_record(&giant_record, &schema)
+                .expect("Giant record should fit on empty page");
+
+            // 4. Try to insert another small record. It should fail with PageFull.
+            let small_record =
+                Record::from(vec![DataValue::Int(2), DataValue::Text("Y".repeat(50))]);
+            let result = leaf_view.insert_record(&small_record, &schema);
+
+            // Assert: `try_add_record` should return `PageFull`, and `insert_record` must bubble it up.
+            assert!(
+                matches!(result, Err(StorageError::PageFull)),
+                "Expected PageFull error when inserting into a saturated leaf node"
+            );
+        } else {
+            panic!("Node should be a Leaf");
+        }
+    }
 }

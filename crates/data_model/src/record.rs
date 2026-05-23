@@ -1,5 +1,5 @@
 use crate::{DataValue, Key};
-use rarmdb_schema_def::{TableDefinition, constraint::Constraint};
+use rarmdb_schema_def::TableDefinition;
 use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 use std::{collections::HashMap, fmt, ops::Deref};
@@ -20,12 +20,9 @@ impl Record {
         // TODO: Should we handle the lack of a primary key more gracefully?
         let constraint = table_def.get_primary_key().unwrap();
 
-        let pk_cols_option = match constraint {
-            Constraint::PrimaryKey { column_names, .. } => Some(column_names),
-            _ => None,
-        };
+        let col_names_option = constraint.col_names();
 
-        if let Some(pk_cols) = pk_cols_option {
+        if let Some(pk_cols) = col_names_option {
             let mut key_values = Vec::with_capacity(pk_cols.len());
             // Create a reverse index lookup to key value order matches primary key definition column order...
             let pk_reverse_lookup: HashMap<&String, usize> =
