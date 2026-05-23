@@ -1,11 +1,10 @@
 pub mod bpm_error;
-pub mod btree_node;
+pub mod btree;
 pub mod buffer_pool_manager;
 pub mod disk_manager;
 pub mod evictor;
 pub mod file_system;
 pub mod frame;
-pub mod leaf_node_view;
 pub mod page;
 pub mod page_guard;
 pub mod page_id;
@@ -17,13 +16,11 @@ pub mod slotted_page_view;
 pub mod storage_error;
 
 pub use bpm_error::BufferPoolError;
-pub use btree_node::BTreeNode;
 pub use buffer_pool_manager::BufferPoolManager;
 pub use disk_manager::DiskManager;
 pub use evictor::Evictor;
 pub use file_system::FileSystem;
 pub use frame::Frame;
-pub use leaf_node_view::LeafNodeView;
 pub use page::PageType;
 pub use page_guard::PageReadGuard;
 pub use page_id::PageId;

@@ -1,4 +1,4 @@
-use crate::{LeafNodeView, SlottedPageView};
+use crate::{SlottedPageView, btree::LeafNodeView};
 
 pub enum BTreeNode<'a> {
     Internal(SlottedPageView<'a>),
