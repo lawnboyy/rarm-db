@@ -29,7 +29,7 @@ mod tests {
     fn test_btree_node_dispatch() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page_view = SlottedPageView::new(&mut buffer);
-        page_view.initialize(PageType::LeafNode);
+        page_view.initialize(PageType::LeafNode, None);
 
         // Act: Wrap the physical view in a logical B-Tree node
         // This is the first goal for your implementation.
@@ -65,7 +65,7 @@ mod tests {
         // 2. Setup Page and Node
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page_view = SlottedPageView::new(&mut buffer);
-        page_view.initialize(PageType::LeafNode);
+        page_view.initialize(PageType::LeafNode, None);
 
         // 3. Manually add records in sorted order of Key (ID)
         // We use the physical page_view here to set up the data for the logical test.
@@ -77,14 +77,14 @@ mod tests {
             ]),
         )
         .unwrap();
-        page_view.try_add_record(0, &rec0).unwrap();
+        page_view.try_insert_record(0, &rec0).unwrap();
 
         let rec1 = record_serializer::serialize(
             &schema.columns,
             &Record::from(vec![DataValue::Int(30), DataValue::Text("Bob".to_string())]),
         )
         .unwrap();
-        page_view.try_add_record(1, &rec1).unwrap();
+        page_view.try_insert_record(1, &rec1).unwrap();
 
         // Wrap in Node
         let node = BTreeNode::new(PageId::new(0, 0), page_view);
@@ -151,7 +151,7 @@ mod tests {
         // 2. Setup Page and Node
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page_view = SlottedPageView::new(&mut buffer);
-        page_view.initialize(PageType::LeafNode);
+        page_view.initialize(PageType::LeafNode, None);
         let mut node = BTreeNode::new(PageId::new(0, 0), page_view);
 
         if let BTreeNode::Leaf(ref mut leaf_view) = node {
@@ -233,7 +233,7 @@ mod tests {
         // 2. Setup Page and Node
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page_view = SlottedPageView::new(&mut buffer);
-        page_view.initialize(PageType::LeafNode);
+        page_view.initialize(PageType::LeafNode, None);
         let mut node = BTreeNode::new(PageId::new(0, 0), page_view);
 
         if let BTreeNode::Leaf(ref mut leaf_view) = node {
@@ -284,7 +284,7 @@ mod tests {
         // 2. Setup Page and Node
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page_view = SlottedPageView::new(&mut buffer);
-        page_view.initialize(PageType::LeafNode);
+        page_view.initialize(PageType::LeafNode, None);
         let mut node = BTreeNode::new(PageId::new(0, 0), page_view);
 
         if let BTreeNode::Leaf(ref mut leaf_view) = node {
@@ -345,7 +345,7 @@ mod tests {
         // 2. Setup Page and Node
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page_view = SlottedPageView::new(&mut buffer);
-        page_view.initialize(PageType::LeafNode);
+        page_view.initialize(PageType::LeafNode, None);
         let mut node = BTreeNode::new(PageId::new(0, 0), page_view);
 
         if let BTreeNode::Leaf(ref mut leaf_view) = node {
@@ -373,192 +373,199 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn test_leaf_node_split_and_insert_with_right_sibling() {
-    //     // 1. Setup Schema
-    //     let mut schema = TableDefinition::new("users".to_string()).unwrap();
-    //     schema.add_column(
-    //         ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
-    //     );
-    //     schema.add_column(
-    //         ColumnDefinition::new(
-    //             "name".to_string(),
-    //             PrimitiveDataType::Varchar(50),
-    //             false,
-    //             None,
-    //         )
-    //         .unwrap(),
-    //     );
-    //     schema.add_constraint(
-    //         Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
-    //     );
+    #[test]
+    fn test_leaf_node_split_and_insert_with_right_sibling() {
+        // 1. Setup Schema
+        let mut schema = TableDefinition::new("users".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new(
+                "name".to_string(),
+                PrimitiveDataType::Varchar(50),
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+        schema.add_constraint(
+            Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
+        );
 
-    //     // 2. Setup Sibling Page Buffers & IDs
-    //     let left_id = PageId {
-    //         table_id: 1,
-    //         page_index: 10,
-    //     };
-    //     let right_id = PageId {
-    //         table_id: 1,
-    //         page_index: 11,
-    //     };
-    //     let orig_right_id = PageId {
-    //         table_id: 1,
-    //         page_index: 12,
-    //     };
+        // 2. Setup Sibling Page Buffers & IDs
+        let left_id = PageId {
+            table_id: 1,
+            page_index: 10,
+        };
+        let right_id = PageId {
+            table_id: 1,
+            page_index: 11,
+        };
+        let orig_right_id = PageId {
+            table_id: 1,
+            page_index: 12,
+        };
 
-    //     let mut left_buffer = [0u8; PAGE_SIZE];
-    //     let mut right_buffer = [0u8; PAGE_SIZE];
-    //     let mut orig_right_buffer = [0u8; PAGE_SIZE];
+        let mut left_buffer = [0u8; PAGE_SIZE];
+        let mut right_buffer = [0u8; PAGE_SIZE];
+        let mut orig_right_buffer = [0u8; PAGE_SIZE];
 
-    //     let mut left_pv = SlottedPageView::new(&mut left_buffer);
-    //     left_pv.initialize(PageType::LeafNode);
-    //     let mut left_view = LeafNodeView::new(left_id, left_pv);
+        let mut left_pv = SlottedPageView::new(&mut left_buffer);
+        left_pv.initialize(PageType::LeafNode, None);
+        let mut left_view = LeafNodeView::new(left_id, left_pv);
 
-    //     let mut right_pv = SlottedPageView::new(&mut right_buffer);
-    //     right_pv.initialize(PageType::LeafNode);
-    //     let mut right_view = LeafNodeView::new(right_id, right_pv);
+        let mut right_pv = SlottedPageView::new(&mut right_buffer);
+        right_pv.initialize(PageType::LeafNode, None);
+        let mut right_view = LeafNodeView::new(right_id, right_pv);
 
-    //     let mut orig_right_pv = SlottedPageView::new(&mut orig_right_buffer);
-    //     orig_right_pv.initialize(PageType::LeafNode);
-    //     let mut original_right_view = LeafNodeView::new(orig_right_id, orig_right_pv);
+        let mut orig_right_pv = SlottedPageView::new(&mut orig_right_buffer);
+        orig_right_pv.initialize(PageType::LeafNode, None);
+        let mut original_right_view = LeafNodeView::new(orig_right_id, orig_right_pv);
 
-    //     // 3. Establish initial pointer links using raw page indices (u32)
-    //     left_view.set_next_leaf_index(Some(orig_right_id.page_index));
-    //     original_right_view.set_prev_leaf_index(Some(left_id.page_index));
+        // 3. Establish initial pointer links using raw page indices (u32)
+        left_view.set_next_leaf_index(Some(orig_right_id.page_index));
+        original_right_view.set_prev_leaf_index(Some(left_id.page_index));
 
-    //     // 4. Populate with initial data
-    //     left_view
-    //         .insert_record(
-    //             &Record::from(vec![
-    //                 DataValue::Int(10),
-    //                 DataValue::Text("Alice".to_string()),
-    //             ]),
-    //             &schema,
-    //         )
-    //         .unwrap();
-    //     left_view
-    //         .insert_record(
-    //             &Record::from(vec![DataValue::Int(20), DataValue::Text("Bob".to_string())]),
-    //             &schema,
-    //         )
-    //         .unwrap();
-    //     left_view
-    //         .insert_record(
-    //             &Record::from(vec![
-    //                 DataValue::Int(30),
-    //                 DataValue::Text("Charlie".to_string()),
-    //             ]),
-    //             &schema,
-    //         )
-    //         .unwrap();
-    //     left_view
-    //         .insert_record(
-    //             &Record::from(vec![
-    //                 DataValue::Int(40),
-    //                 DataValue::Text("David".to_string()),
-    //             ]),
-    //             &schema,
-    //         )
-    //         .unwrap();
+        // 4. Populate with initial data
+        left_view
+            .insert_record(
+                &Record::from(vec![
+                    DataValue::Int(10),
+                    DataValue::Text("Alice".to_string()),
+                ]),
+                &schema,
+            )
+            .unwrap();
+        left_view
+            .insert_record(
+                &Record::from(vec![DataValue::Int(20), DataValue::Text("Bob".to_string())]),
+                &schema,
+            )
+            .unwrap();
+        left_view
+            .insert_record(
+                &Record::from(vec![
+                    DataValue::Int(30),
+                    DataValue::Text("Charlie".to_string()),
+                ]),
+                &schema,
+            )
+            .unwrap();
+        left_view
+            .insert_record(
+                &Record::from(vec![
+                    DataValue::Int(40),
+                    DataValue::Text("David".to_string()),
+                ]),
+                &schema,
+            )
+            .unwrap();
 
-    //     original_right_view
-    //         .insert_record(
-    //             &Record::from(vec![DataValue::Int(50), DataValue::Text("Eve".to_string())]),
-    //             &schema,
-    //         )
-    //         .unwrap();
-    //     original_right_view
-    //         .insert_record(
-    //             &Record::from(vec![
-    //                 DataValue::Int(60),
-    //                 DataValue::Text("Frank".to_string()),
-    //             ]),
-    //             &schema,
-    //         )
-    //         .unwrap();
+        original_right_view
+            .insert_record(
+                &Record::from(vec![DataValue::Int(50), DataValue::Text("Eve".to_string())]),
+                &schema,
+            )
+            .unwrap();
+        original_right_view
+            .insert_record(
+                &Record::from(vec![
+                    DataValue::Int(60),
+                    DataValue::Text("Frank".to_string()),
+                ]),
+                &schema,
+            )
+            .unwrap();
 
-    //     // New record that caused the split
-    //     let rec25 = Record::from(vec![
-    //         DataValue::Int(25),
-    //         DataValue::Text("Grace".to_string()),
-    //     ]);
+        // New record that caused the split
+        let rec25 = Record::from(vec![
+            DataValue::Int(25),
+            DataValue::Text("Grace".to_string()),
+        ]);
 
-    //     // 5. Act: Execute split and insert with record as the FIRST parameter
-    //     left_view
-    //         .split_and_insert(
-    //             &rec25,
-    //             &mut right_view,
-    //             Some(&mut original_right_view),
-    //             &schema,
-    //         )
-    //         .expect("Split and insert should succeed");
+        // 5. Act: Execute split and insert (Expected to return the separator Key!)
+        let separator_key = left_view
+            .split_and_insert(
+                &rec25,
+                &mut right_view,
+                Some(&mut original_right_view),
+                &schema,
+            )
+            .expect("Split and insert should succeed");
 
-    //     // 6. Assert Sibling Pointer Updates using page indices (u32)
-    //     assert_eq!(
-    //         left_view.get_next_leaf_index(),
-    //         Some(right_id.page_index),
-    //         "Left should now point to new Right sibling page index"
-    //     );
-    //     assert_eq!(
-    //         left_view.get_prev_leaf_index(),
-    //         None,
-    //         "Left prev pointer should remain None"
-    //     );
+        // 6. Assert Sibling Pointer Updates using page indices (u32)
+        assert_eq!(
+            left_view.get_next_leaf_index(),
+            Some(right_id.page_index),
+            "Left should now point to new Right sibling page index"
+        );
+        assert_eq!(
+            left_view.get_prev_leaf_index(),
+            None,
+            "Left prev pointer should remain None"
+        );
 
-    //     assert_eq!(
-    //         right_view.get_prev_leaf_index(),
-    //         Some(left_id.page_index),
-    //         "New Right sibling prev should point to Left page index"
-    //     );
-    //     assert_eq!(
-    //         right_view.get_next_leaf_index(),
-    //         Some(orig_right_id.page_index),
-    //         "New Right sibling next should point to Original Right page index"
-    //     );
+        assert_eq!(
+            right_view.get_prev_leaf_index(),
+            Some(left_id.page_index),
+            "New Right sibling prev should point to Left page index"
+        );
+        assert_eq!(
+            right_view.get_next_leaf_index(),
+            Some(orig_right_id.page_index),
+            "New Right sibling next should point to Original Right page index"
+        );
 
-    //     assert_eq!(
-    //         original_right_view.get_prev_leaf_index(),
-    //         Some(right_id.page_index),
-    //         "Original Right prev should now point to new Right sibling page index"
-    //     );
+        assert_eq!(
+            original_right_view.get_prev_leaf_index(),
+            Some(right_id.page_index),
+            "Original Right prev should now point to new Right sibling page index"
+        );
 
-    //     // 7. Assert Data Key Redistribution & Logical Order
-    //     let mut left_keys = Vec::new();
-    //     for i in 0..left_view.page_view.get_item_count() {
-    //         let record_bytes = left_view.page_view.get_record(i).unwrap();
-    //         let key = record_serializer::deserialize_primary_key(&schema, record_bytes).unwrap();
-    //         left_keys.push(key);
-    //     }
+        // 7. Assert Data Key Redistribution & Logical Order
+        let mut left_keys = Vec::new();
+        for i in 0..left_view.page_view.get_item_count() {
+            let record_bytes = left_view.page_view.get_record(i).unwrap();
+            let key = record_serializer::deserialize_primary_key(&schema, record_bytes).unwrap();
+            left_keys.push(key);
+        }
 
-    //     let mut right_keys = Vec::new();
-    //     for i in 0..right_view.page_view.get_item_count() {
-    //         let record_bytes = right_view.page_view.get_record(i).unwrap();
-    //         let key = record_serializer::deserialize_primary_key(&schema, record_bytes).unwrap();
-    //         right_keys.push(key);
-    //     }
+        let mut right_keys = Vec::new();
+        for i in 0..right_view.page_view.get_item_count() {
+            let record_bytes = right_view.page_view.get_record(i).unwrap();
+            let key = record_serializer::deserialize_primary_key(&schema, record_bytes).unwrap();
+            right_keys.push(key);
+        }
 
-    //     if let (Some(max_left), Some(min_right)) = (left_keys.last(), right_keys.first()) {
-    //         assert!(
-    //             max_left < min_right,
-    //             "Records were not correctly partitioned across split"
-    //         );
-    //     } else {
-    //         panic!("Both split nodes must have at least one record post-split");
-    //     }
+        if let (Some(max_left), Some(min_right)) = (left_keys.last(), right_keys.first()) {
+            assert!(
+                max_left < min_right,
+                "Records were not correctly partitioned across split"
+            );
+        } else {
+            panic!("Both split nodes must have at least one record post-split");
+        }
 
-    //     let mut all_keys = Vec::new();
-    //     all_keys.extend(left_keys);
-    //     all_keys.extend(right_keys);
+        let mut all_keys = Vec::new();
+        all_keys.extend(left_keys);
+        all_keys.extend(right_keys.clone());
 
-    //     let expected_keys = vec![
-    //         Key::from(DataValue::Int(10)),
-    //         Key::from(DataValue::Int(20)),
-    //         Key::from(DataValue::Int(25)),
-    //         Key::from(DataValue::Int(30)),
-    //         Key::from(DataValue::Int(40)),
-    //     ];
+        let expected_keys = vec![
+            Key::from(DataValue::Int(10)),
+            Key::from(DataValue::Int(20)),
+            Key::from(DataValue::Int(25)),
+            Key::from(DataValue::Int(30)),
+            Key::from(DataValue::Int(40)),
+        ];
 
-    //     assert_eq!(expected_keys, all_keys);
-    // }
+        assert_eq!(expected_keys, all_keys);
+
+        // 8. Assert Separator Key Integrity
+        // The separator key pushed to the parent must match the lowest key in the right sibling node
+        assert_eq!(
+            right_keys[0], separator_key,
+            "The returned separator key must match the first key of the newly split right sibling"
+        );
+    }
 }

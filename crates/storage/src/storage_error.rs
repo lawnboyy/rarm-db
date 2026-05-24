@@ -3,5 +3,6 @@ pub enum StorageError {
     DuplicateKey,
     KeyNotFound,
     InvalidSlotIndex,
+    NewRightSiblingNotEmpty,
     PageFull,
 }

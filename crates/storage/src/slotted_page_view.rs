@@ -1,10 +1,8 @@
-use rarmdb_data_model::Record;
-
 use crate::{
     PageType,
     page::{
         PAGE_HEADER_DATA_HEAP_END_OFFSET_OFFSET, PAGE_HEADER_ITEM_COUNT_OFFSET,
-        PAGE_HEADER_PAGE_TYPE_OFFSET, PAGE_HEADER_SIZE,
+        PAGE_HEADER_PAGE_TYPE_OFFSET, PAGE_HEADER_PARENT_INDEX_OFFSET, PAGE_HEADER_SIZE,
     },
     page_id::PAGE_SIZE,
     slot::SLOT_SIZE,
@@ -29,9 +27,20 @@ impl<'a> SlottedPageView<'a> {
         SlottedPageView { buffer }
     }
 
-    pub fn initialize(&mut self, page_type: PageType) {
+    pub fn initialize(&mut self, page_type: PageType, parent_page_index: Option<u64>) {
+        // Reset the data buffer...
+        self.buffer.fill(0);
+
         // Set the byte at the page type offset...
         self.buffer[PAGE_HEADER_PAGE_TYPE_OFFSET] = page_type as u8;
+
+        // Set the parent
+        let parent_index = if let Some(index) = parent_page_index {
+            index
+        } else {
+            u64::MAX
+        };
+        self.set_page_header_u64_value(PAGE_HEADER_PARENT_INDEX_OFFSET, parent_index);
 
         // Data heap grows backwards, so the data heap starting offset is the end of the page.
         self.buffer
@@ -198,9 +207,13 @@ impl<'a> SlottedPageView<'a> {
         Some(&self.buffer[record_offset..record_offset + record_size])
     }
 
-    /// Attempts to add a new record to the page. If there is insufficient space on the page for
+    /// Attempts to insert a new record to the page. If there is insufficient space on the page for
     /// the given record, a PageFull error is returned. Otherwise, the insertion index is returned.
-    pub fn try_add_record(&mut self, index: u16, record_data: &[u8]) -> Result<u16, StorageError> {
+    pub fn try_insert_record(
+        &mut self,
+        index: u16,
+        record_data: &[u8],
+    ) -> Result<u16, StorageError> {
         // Check if there is enough space available on the page for this record...
         let free_space = self.get_free_space_contiguous();
         if free_space < record_data.len() + SLOT_SIZE {
@@ -322,6 +335,22 @@ impl<'a> SlottedPageView<'a> {
         Ok(index)
     }
 
+    pub fn get_page_header_u8_value(&self, offset: usize) -> u8 {
+        let page_header_offset_bytes: [u8; 1] = self.buffer[offset..offset + 1]
+            .try_into()
+            .expect("Page header value offset exceeded the page size!");
+        let page_header_value = u8::from_le_bytes(page_header_offset_bytes);
+        page_header_value
+    }
+
+    pub fn get_page_header_u16_value(&self, offset: usize) -> u16 {
+        let page_header_offset_bytes: [u8; 2] = self.buffer[offset..offset + 2]
+            .try_into()
+            .expect("Page header value offset exceeded the page size!");
+        let page_header_value = u16::from_le_bytes(page_header_offset_bytes);
+        page_header_value
+    }
+
     pub(crate) fn get_page_header_u32_value(&self, offset: usize) -> u32 {
         let page_header_offset_bytes: [u8; 4] = self.buffer[offset..offset + 4]
             .try_into()
@@ -330,12 +359,27 @@ impl<'a> SlottedPageView<'a> {
         page_header_value
     }
 
-    fn get_page_header_u16_value(&self, offset: usize) -> u16 {
-        let page_header_offset_bytes: [u8; 2] = self.buffer[offset..offset + 2]
+    pub(crate) fn get_page_header_u64_value(&self, offset: usize) -> u64 {
+        let page_header_offset_bytes: [u8; 8] = self.buffer[offset..offset + 8]
             .try_into()
             .expect("Page header value offset exceeded the page size!");
-        let page_header_value = u16::from_le_bytes(page_header_offset_bytes);
+        let page_header_value = u64::from_le_bytes(page_header_offset_bytes);
         page_header_value
+    }
+
+    pub(crate) fn set_page_header_u16_value(&mut self, offset: usize, value: u16) {
+        let value_le_bytes = u16::to_le_bytes(value);
+        self.buffer[offset..offset + 2].copy_from_slice(&value_le_bytes);
+    }
+
+    pub(crate) fn set_page_header_u32_value(&mut self, offset: usize, value: u32) {
+        let value_le_bytes = u32::to_le_bytes(value);
+        self.buffer[offset..offset + 4].copy_from_slice(&value_le_bytes);
+    }
+
+    pub(crate) fn set_page_header_u64_value(&mut self, offset: usize, value: u64) {
+        let value_le_bytes = u64::to_le_bytes(value);
+        self.buffer[offset..offset + 8].copy_from_slice(&value_le_bytes);
     }
 
     fn get_slot(&self, index: u16) -> (usize, usize) {
@@ -351,11 +395,6 @@ impl<'a> SlottedPageView<'a> {
         let record_size = u16::from_le_bytes(record_size_bytes) as usize;
 
         (record_offset, record_size)
-    }
-
-    fn set_page_header_u16_value(&mut self, offset: usize, value: u16) {
-        let value_le_bytes = u16::to_le_bytes(value);
-        self.buffer[offset..offset + 2].copy_from_slice(&value_le_bytes);
     }
 
     fn set_slot(&mut self, index: u16, record_offset: u16, record_size: u16) {
@@ -378,7 +417,7 @@ mod tests {
         let mut page = SlottedPageView::new(&mut buffer);
 
         // We use LeafNode as a sample type for initialization
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         assert_eq!(PageType::LeafNode, page.get_page_type());
         assert_eq!(0, page.get_item_count());
@@ -398,7 +437,7 @@ mod tests {
         let mut page2 = SlottedPageView::new(&mut buffer2);
 
         // We use LeafNode as a sample type for initialization
-        page2.initialize(PageType::InternalNode);
+        page2.initialize(PageType::InternalNode, None);
 
         assert_eq!(PageType::InternalNode, page2.get_page_type());
     }
@@ -407,13 +446,13 @@ mod tests {
     fn test_add_record_verify_buffer_directly() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         let data = b"Hello Slotted Page";
         let data_len = data.len() as u16;
 
         // Act: Add the first record at logical index 0
-        page.try_add_record(0, data)
+        page.try_insert_record(0, data)
             .expect("Should have room for record");
 
         // Assert: Metadata updated
@@ -449,15 +488,15 @@ mod tests {
 
         let (item_count, free_space) = {
             let mut page = SlottedPageView::new(&mut buffer);
-            page.initialize(PageType::LeafNode);
+            page.initialize(PageType::LeafNode, None);
 
             // 1. Add records to the start and end of the eventual array
-            page.try_add_record(0, b"Record 0").expect("Insert at 0");
-            page.try_add_record(1, b"Record 2").expect("Insert at 1");
+            page.try_insert_record(0, b"Record 0").expect("Insert at 0");
+            page.try_insert_record(1, b"Record 2").expect("Insert at 1");
 
             // 2. Insert into the middle (logical index 1)
             // This forces "Record 2" to shift right in the slot array.
-            page.try_add_record(1, b"Record 1")
+            page.try_insert_record(1, b"Record 1")
                 .expect("Insert in middle");
 
             (page.get_item_count(), page.get_free_space_contiguous())
@@ -497,10 +536,10 @@ mod tests {
     fn test_insert_at_invalid_index_fails() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // Cannot insert at index 1 if index 0 is empty
-        let result = page.try_add_record(1, b"data");
+        let result = page.try_insert_record(1, b"data");
         assert!(
             result.is_err(),
             "Should not allow out-of-bounds insertion index"
@@ -511,20 +550,20 @@ mod tests {
     fn test_page_full_returns_error() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // Fill the page until it's almost full
         let max_data_size = PAGE_SIZE - PAGE_HEADER_SIZE - SLOT_SIZE;
         let giant_record = vec![0u8; max_data_size];
 
-        page.try_add_record(0, &giant_record)
+        page.try_insert_record(0, &giant_record)
             .expect("Should fit giant record");
 
         // CONTIGUOUS Free space should be 0
         assert_eq!(0, page.get_free_space_contiguous());
 
         // Attempting to add anything else should fail
-        let result = page.try_add_record(1, b"extra");
+        let result = page.try_insert_record(1, b"extra");
         assert!(
             result.is_err(),
             "Should fail when no space for slot and data"
@@ -535,13 +574,13 @@ mod tests {
     fn test_get_record_retrieves_correct_data() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         let rec0 = b"Alpha";
         let rec1 = b"Beta";
 
-        page.try_add_record(0, rec0).unwrap();
-        page.try_add_record(1, rec1).unwrap();
+        page.try_insert_record(0, rec0).unwrap();
+        page.try_insert_record(1, rec1).unwrap();
 
         // Act & Assert
         assert_eq!(Some(rec0.as_slice()), page.get_record(0));
@@ -553,10 +592,10 @@ mod tests {
     fn test_update_record_in_place() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // 1. Setup: Add a record
-        page.try_add_record(0, b"Old Data")
+        page.try_insert_record(0, b"Old Data")
             .expect("Initial add failed");
         let free_space_after_add = page.get_free_space_contiguous();
 
@@ -577,10 +616,10 @@ mod tests {
     fn test_update_record_relocates_when_larger() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // 1. Setup: Add a small record
-        page.try_add_record(0, b"Small")
+        page.try_insert_record(0, b"Small")
             .expect("Initial add failed");
         let free_space_after_add = page.get_free_space_contiguous();
 
@@ -609,15 +648,16 @@ mod tests {
     fn test_update_record_fails_when_relocation_exceeds_space() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // 1. Add an initial record (Small)
-        page.try_add_record(0, b"Small").unwrap();
+        page.try_insert_record(0, b"Small").unwrap();
 
         // 2. Fill almost the entire page with another record
         let remaining_usable = page.get_free_space_contiguous() - SLOT_SIZE;
         let filler = vec![0u8; remaining_usable - 10]; // Leave exactly 10 bytes of free space
-        page.try_add_record(1, &filler).expect("Should fit filler");
+        page.try_insert_record(1, &filler)
+            .expect("Should fit filler");
 
         assert_eq!(10, page.get_free_space_contiguous());
 
@@ -635,16 +675,16 @@ mod tests {
     fn test_update_record_at_exact_remaining_space_limit() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // 1. Add an initial record
-        page.try_add_record(0, b"A").unwrap();
+        page.try_insert_record(0, b"A").unwrap();
 
         // 2. Fill the page such that there are exactly 20 bytes of contiguous free space left
         // Note: we subtract SLOT_SIZE here because try_add_record consumes both data and a new slot entry.
         let remaining_for_filler = page.get_free_space_contiguous() - SLOT_SIZE - 20;
         let filler = vec![0u8; remaining_for_filler];
-        page.try_add_record(1, &filler).unwrap();
+        page.try_insert_record(1, &filler).unwrap();
 
         let free_before = page.get_free_space_contiguous();
         assert_eq!(20, free_before);
@@ -674,10 +714,10 @@ mod tests {
     fn test_update_record_fails_one_byte_over_limit() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // 1. Setup: add a record
-        page.try_add_record(0, b"Data").unwrap();
+        page.try_insert_record(0, b"Data").unwrap();
 
         // 2. Get current free space
         let free = page.get_free_space_contiguous();
@@ -697,10 +737,10 @@ mod tests {
     fn test_update_record_smaller_size_updates_slot_length() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // 1. Setup: Add a record with 10 bytes
-        page.try_add_record(0, b"0123456789").unwrap();
+        page.try_insert_record(0, b"0123456789").unwrap();
         let free_space_after_add = page.get_free_space_contiguous();
 
         // 2. Act: Update with a smaller record (4 bytes)
@@ -722,10 +762,10 @@ mod tests {
     fn test_update_record_invalid_index_returns_error() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // 1. Setup: Add 1 record
-        page.try_add_record(0, b"Original").unwrap();
+        page.try_insert_record(0, b"Original").unwrap();
 
         // 2. Act: Attempt to update index 1 (does not exist)
         let result = page.try_update_record(1, b"New Data");
@@ -739,12 +779,12 @@ mod tests {
     fn test_delete_record_shifts_slots_left() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // 1. Setup: Add 3 records
-        page.try_add_record(0, b"Record A").unwrap();
-        page.try_add_record(1, b"Record B").unwrap();
-        page.try_add_record(2, b"Record C").unwrap();
+        page.try_insert_record(0, b"Record A").unwrap();
+        page.try_insert_record(1, b"Record B").unwrap();
+        page.try_insert_record(2, b"Record C").unwrap();
 
         let free_space_before = page.get_free_space_contiguous();
 
@@ -775,12 +815,12 @@ mod tests {
     fn test_delete_first_record_shifts_all_others() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // 1. Setup: Add 3 records
-        page.try_add_record(0, b"Record 0").unwrap();
-        page.try_add_record(1, b"Record 1").unwrap();
-        page.try_add_record(2, b"Record 2").unwrap();
+        page.try_insert_record(0, b"Record 0").unwrap();
+        page.try_insert_record(1, b"Record 1").unwrap();
+        page.try_insert_record(2, b"Record 2").unwrap();
 
         // 2. Act: Delete the very first record (index 0)
         page.delete_record(0);
@@ -801,10 +841,10 @@ mod tests {
     fn test_delete_record_invalid_index_is_noop() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // 1. Setup: Add 1 record
-        page.try_add_record(0, b"Stay").unwrap();
+        page.try_insert_record(0, b"Stay").unwrap();
         let initial_free_space = page.get_free_space_contiguous();
 
         // 2. Act: Attempt to delete an out-of-bounds index (index 1 when only 0 exists)
@@ -821,14 +861,14 @@ mod tests {
     fn test_interleaved_inserts_and_deletes() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // Sequence mimicking B-Tree rebalancing/shifts
 
         // 1. Initial Fill: [A, B, C]
-        page.try_add_record(0, b"A").unwrap();
-        page.try_add_record(1, b"B").unwrap();
-        page.try_add_record(2, b"C").unwrap();
+        page.try_insert_record(0, b"A").unwrap();
+        page.try_insert_record(1, b"B").unwrap();
+        page.try_insert_record(2, b"C").unwrap();
 
         // 2. Delete from middle: [A, C]
         page.delete_record(1);
@@ -837,7 +877,7 @@ mod tests {
         assert_eq!(Some(b"C".as_slice()), page.get_record(1));
 
         // 3. Insert into middle: [A, D, C]
-        page.try_add_record(1, b"D").unwrap();
+        page.try_insert_record(1, b"D").unwrap();
         assert_eq!(3, page.get_item_count());
         assert_eq!(Some(b"A".as_slice()), page.get_record(0));
         assert_eq!(Some(b"D".as_slice()), page.get_record(1));
@@ -859,13 +899,13 @@ mod tests {
     fn test_get_total_free_space_with_fragmentation() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // 1. Add three records of 10 bytes each
         // Each add uses: 10 bytes (data) + 4 bytes (slot) = 14 bytes
-        page.try_add_record(0, b"0123456789").unwrap();
-        page.try_add_record(1, b"0123456789").unwrap();
-        page.try_add_record(2, b"0123456789").unwrap();
+        page.try_insert_record(0, b"0123456789").unwrap();
+        page.try_insert_record(1, b"0123456789").unwrap();
+        page.try_insert_record(2, b"0123456789").unwrap();
 
         let initial_contiguous = page.get_free_space_contiguous();
 
@@ -904,12 +944,12 @@ mod tests {
     fn test_compact_reclaims_fragmented_space() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // 1. Setup: Add 3 records
-        page.try_add_record(0, b"Record 0").unwrap();
-        page.try_add_record(1, b"Record 1").unwrap();
-        page.try_add_record(2, b"Record 2").unwrap();
+        page.try_insert_record(0, b"Record 0").unwrap();
+        page.try_insert_record(1, b"Record 1").unwrap();
+        page.try_insert_record(2, b"Record 2").unwrap();
 
         // 2. Fragment the page by deleting the middle record
         page.delete_record(1);
@@ -952,10 +992,10 @@ mod tests {
     fn test_compact_reclaims_space_after_relocation_updates() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
         // 1. Add a small record
-        page.try_add_record(0, b"Original").unwrap();
+        page.try_insert_record(0, b"Original").unwrap();
         let initial_total_free = page.get_free_space();
 
         // 2. Update to a much larger size to force relocation
@@ -989,10 +1029,10 @@ mod tests {
     fn test_compact_after_all_records_deleted_resets_heap() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
-        page.try_add_record(0, b"Data A").unwrap();
-        page.try_add_record(1, b"Data B").unwrap();
+        page.try_insert_record(0, b"Data A").unwrap();
+        page.try_insert_record(1, b"Data B").unwrap();
 
         // Delete everything
         page.delete_record(0);
@@ -1023,9 +1063,9 @@ mod tests {
     fn test_compact_on_already_contiguous_page_is_noop() {
         let mut buffer = [0u8; PAGE_SIZE];
         let mut page = SlottedPageView::new(&mut buffer);
-        page.initialize(PageType::LeafNode);
+        page.initialize(PageType::LeafNode, None);
 
-        page.try_add_record(0, b"Contiguous").unwrap();
+        page.try_insert_record(0, b"Contiguous").unwrap();
         let data_start_before = page.get_data_start_offset();
         let free_before = page.get_free_space_contiguous();
 
