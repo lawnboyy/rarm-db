@@ -22,6 +22,18 @@ impl<'a> LeafNodeView<'a> {
         LeafNodeView { page_id, page_view }
     }
 
+    /// This is a convenience method for performance that will append a record to the end of the slot array. It
+    /// assumes that the caller knows that this record's key is the largest on the page. This is useful for splits
+    /// and merges because the records will be ordered and appended to the page one at a time. There is no need
+    /// to perform the binary search to find the insertion index.
+    pub fn append(&mut self, record_data: &[u8]) -> Result<u16, StorageError> {
+        // Retrieve the item count from the header... this will be the insertion index.
+        let item_count = self
+            .page_view
+            .get_page_header_u16_value(PAGE_HEADER_ITEM_COUNT_OFFSET);
+        self.page_view.try_insert_record(item_count, record_data)
+    }
+
     pub fn get_item_count(&self) -> u16 {
         self.page_view
             .get_page_header_u16_value(PAGE_HEADER_ITEM_COUNT_OFFSET)
@@ -88,6 +100,16 @@ impl<'a> LeafNodeView<'a> {
         // A record with this primary key already exists, so it's a duplicate key...
         Err(StorageError::DuplicateKey)
     }
+
+    /// Appends the records of the right sibling to the end of this leaf node to reclaim a page of storage and keep
+    /// the nodes data dense.
+    // pub fn merge(
+    //     &mut self,
+    //     right_sibling: &mut LeafNodeView<'_>,
+    //     right_sibling_next: Option<&mut LeafNodeView<'_>>,
+    //     table_def: &TableDefinition,
+    // ) -> Result<(), StorageError> {
+    // }
 
     pub fn set_next_leaf_index(&mut self, page_index: Option<u32>) {
         let index = if let Some(i) = page_index {
@@ -211,7 +233,7 @@ impl<'a> LeafNodeView<'a> {
             // Append the raw record to the page (we can just call insert here, but it's essentially an append operation because
             // the records are sorted)
             let record = &sorted_records[index];
-            let insert_result = self.page_view.try_insert_record(index as u16, record);
+            let insert_result = self.append(record);
             if let Err(err) = insert_result {
                 return Err(err);
             }
@@ -219,14 +241,12 @@ impl<'a> LeafNodeView<'a> {
 
         // For midpoint to data row length
         let final_count: usize = item_count as usize + 1;
-        let mut slot_index = 0;
         for index in split_index..final_count {
             // Append the raw record to the page (we can just call insert here, but it's essentially an append operation because
             // the records are sorted)
             let record = &sorted_records[index];
             // Append the raw record to the new right sibling leaf
-            let insert_result = right_sibling.insert_raw_record(slot_index, record);
-            slot_index += 1;
+            let insert_result = right_sibling.append(record);
             if let Err(err) = insert_result {
                 return Err(err);
             }

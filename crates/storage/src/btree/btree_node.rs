@@ -679,4 +679,135 @@ mod tests {
             "The returned separator key must match the first key of the newly split right sibling"
         );
     }
+
+    // #[test]
+    // fn test_leaf_node_merge_with_next_sibling() {
+    //     // 1. Setup Schema
+    //     let mut schema = TableDefinition::new("users".to_string()).unwrap();
+    //     schema.add_column(
+    //         ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+    //     );
+    //     schema.add_constraint(
+    //         Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
+    //     );
+
+    //     // 2. Setup 3 Sibling Nodes: Left (10), Middle (11), Right (12)
+    //     let left_id = PageId {
+    //         table_id: 1,
+    //         page_index: 10,
+    //     };
+    //     let mid_id = PageId {
+    //         table_id: 1,
+    //         page_index: 11,
+    //     };
+    //     let right_id = PageId {
+    //         table_id: 1,
+    //         page_index: 12,
+    //     };
+
+    //     let mut left_buffer = [0u8; PAGE_SIZE];
+    //     let mut mid_buffer = [0u8; PAGE_SIZE];
+    //     let mut right_buffer = [0u8; PAGE_SIZE];
+
+    //     let mut left_pv = SlottedPageView::new(&mut left_buffer);
+    //     left_pv.initialize(PageType::LeafNode, None);
+    //     let mut left_view = LeafNodeView::new(left_id, left_pv);
+
+    //     let mut mid_pv = SlottedPageView::new(&mut mid_buffer);
+    //     mid_pv.initialize(PageType::LeafNode, None);
+    //     let mut mid_view = LeafNodeView::new(mid_id, mid_pv);
+
+    //     let mut right_pv = SlottedPageView::new(&mut right_buffer);
+    //     right_pv.initialize(PageType::LeafNode, None);
+    //     let mut right_view = LeafNodeView::new(right_id, right_pv);
+
+    //     // 3. Establish initial pointer links (Left <-> Mid <-> Right)
+    //     left_view.set_next_leaf_index(Some(mid_id.page_index));
+
+    //     mid_view.set_prev_leaf_index(Some(left_id.page_index));
+    //     mid_view.set_next_leaf_index(Some(right_id.page_index));
+
+    //     right_view.set_prev_leaf_index(Some(mid_id.page_index));
+
+    //     // 4. Populate with data
+    //     // Left Node: Keys 10, 20
+    //     left_view
+    //         .insert_record(&Record::from(vec![DataValue::Int(10)]), &schema)
+    //         .unwrap();
+    //     left_view
+    //         .insert_record(&Record::from(vec![DataValue::Int(20)]), &schema)
+    //         .unwrap();
+
+    //     // Middle Node: Keys 30, 40
+    //     mid_view
+    //         .insert_record(&Record::from(vec![DataValue::Int(30)]), &schema)
+    //         .unwrap();
+    //     mid_view
+    //         .insert_record(&Record::from(vec![DataValue::Int(40)]), &schema)
+    //         .unwrap();
+
+    //     // Right Node: Keys 50, 60
+    //     right_view
+    //         .insert_record(&Record::from(vec![DataValue::Int(50)]), &schema)
+    //         .unwrap();
+    //     right_view
+    //         .insert_record(&Record::from(vec![DataValue::Int(60)]), &schema)
+    //         .unwrap();
+
+    //     // 5. Act: Merge Mid (Right sibling) into Left, passing Right as the "next sibling's sibling"
+    //     left_view
+    //         .merge(&mut mid_view, Some(&mut right_view), &schema)
+    //         .expect("Merge should succeed");
+
+    //     // 6. Assert Data Integrity: Left should now contain 10, 20, 30, 40 in order
+    //     assert_eq!(
+    //         4,
+    //         left_view.page_view.get_item_count(),
+    //         "Left leaf should now contain combined record count"
+    //     );
+
+    //     let mut left_keys = Vec::new();
+    //     for i in 0..left_view.page_view.get_item_count() {
+    //         let record_bytes = left_view.page_view.get_record(i).unwrap();
+    //         let key = record_serializer::deserialize_primary_key(&schema, record_bytes).unwrap();
+    //         left_keys.push(key);
+    //     }
+
+    //     let expected_keys = vec![
+    //         Key::from(DataValue::Int(10)),
+    //         Key::from(DataValue::Int(20)),
+    //         Key::from(DataValue::Int(30)),
+    //         Key::from(DataValue::Int(40)),
+    //     ];
+    //     assert_eq!(expected_keys, left_keys);
+
+    //     // 7. Assert Sibling Pointer Realignment (Left <-> Right, Mid is bypass-linked out)
+    //     assert_eq!(
+    //         left_view.get_next_leaf_index(),
+    //         Some(right_id.page_index),
+    //         "Left should now point directly to Right"
+    //     );
+    //     assert_eq!(
+    //         right_view.get_prev_leaf_index(),
+    //         Some(left_id.page_index),
+    //         "Right should now point back directly to Left"
+    //     );
+
+    //     // 8. Assert Evicted Sibling is clean / initialized
+    //     assert_eq!(
+    //         0,
+    //         mid_view.page_view.get_item_count(),
+    //         "Merged-away node should be cleared of records"
+    //     );
+    //     assert_eq!(
+    //         None,
+    //         mid_view.get_next_leaf_index(),
+    //         "Merged-away node next leaf index should be cleared"
+    //     );
+    //     assert_eq!(
+    //         None,
+    //         mid_view.get_prev_leaf_index(),
+    //         "Merged-away node prev leaf index should be cleared"
+    //     );
+    // }
 }
