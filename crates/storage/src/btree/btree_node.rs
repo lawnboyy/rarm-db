@@ -810,4 +810,73 @@ mod tests {
             "Merged-away node prev leaf index should be cleared"
         );
     }
+
+    #[test]
+    fn test_leaf_node_merge_no_next_sibling() {
+        // 1. Setup Schema
+        let mut schema = TableDefinition::new("users".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_constraint(
+            Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
+        );
+
+        // 2. Setup 2 Sibling Nodes at the right boundary of the leaf level: Left (10), Right (11)
+        let left_id = PageId {
+            table_id: 1,
+            page_index: 10,
+        };
+        let right_id = PageId {
+            table_id: 1,
+            page_index: 11,
+        };
+
+        let mut left_buffer = [0u8; PAGE_SIZE];
+        let mut right_buffer = [0u8; PAGE_SIZE];
+
+        let mut left_pv = SlottedPageView::new(&mut left_buffer);
+        left_pv.initialize(PageType::LeafNode, None);
+        let mut left_view = LeafNodeView::new(left_id, left_pv);
+
+        let mut right_pv = SlottedPageView::new(&mut right_buffer);
+        right_pv.initialize(PageType::LeafNode, None);
+        let mut right_view = LeafNodeView::new(right_id, right_pv);
+
+        // 3. Establish initial pointer links (Left <-> Right -> None)
+        left_view.set_next_leaf_index(Some(right_id.page_index));
+        right_view.set_prev_leaf_index(Some(left_id.page_index));
+        right_view.set_next_leaf_index(None);
+
+        // 4. Populate with data
+        left_view
+            .insert_record(&Record::from(vec![DataValue::Int(10)]), &schema)
+            .unwrap();
+        left_view
+            .insert_record(&Record::from(vec![DataValue::Int(20)]), &schema)
+            .unwrap();
+
+        right_view
+            .insert_record(&Record::from(vec![DataValue::Int(30)]), &schema)
+            .unwrap();
+        right_view
+            .insert_record(&Record::from(vec![DataValue::Int(40)]), &schema)
+            .unwrap();
+
+        // 5. Act: Merge Right into Left, passing None as there is no further right sibling
+        left_view
+            .merge(&mut right_view, None)
+            .expect("Merge should succeed");
+
+        // 6. Assert Data Integrity
+        assert_eq!(4, left_view.page_view.get_item_count());
+
+        // 7. Assert Sibling Pointer Realignment (Left -> None)
+        assert_eq!(
+            left_view.get_next_leaf_index(),
+            None,
+            "Left should have no next sibling now"
+        );
+        assert_eq!(left_view.get_prev_leaf_index(), None);
+    }
 }

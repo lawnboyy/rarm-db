@@ -20,10 +20,10 @@ impl ColumnDefinition {
             return Err(SchemaError::InvalidColumnName);
         }
 
-        if let Some(ref val) = default_value {
-            if val.trim().is_empty() {
-                return Err(SchemaError::EmptyDefaultValue);
-            }
+        if let Some(ref val) = default_value
+            && val.trim().is_empty()
+        {
+            return Err(SchemaError::EmptyDefaultValue);
         }
 
         Ok(ColumnDefinition {

@@ -37,7 +37,7 @@ impl Hash for OrderedFloat {
         // that can be consistently hashed if it is -0.0 which won't hash the
         // same as 0.0. We also handle NaN which will not hash the same for
         // every instance.
-        let mut coerced_value = self.clone().0;
+        let mut coerced_value = self.0;
         if self.0 == -0.0 {
             // Force the value to be positive 0.0 and hash that...
             coerced_value = 0.0;

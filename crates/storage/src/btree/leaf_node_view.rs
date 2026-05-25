@@ -10,7 +10,7 @@ use crate::{
         PAGE_HEADER_PREV_SIBLING_LEAF_PAGE_INDEX_OFFSET,
     },
     page_id::PAGE_SIZE,
-    record_serializer, slot,
+    record_serializer,
 };
 
 pub struct LeafNodeView<'a> {
@@ -266,14 +266,10 @@ impl<'a> LeafNodeView<'a> {
             .initialize(crate::PageType::LeafNode, parent_index);
 
         // Copy the first half of the data to this leaf page...
-        for index in 0..split_index {
+        for record in sorted_records.iter().take(split_index) {
             // Append the raw record to the page (we can just call insert here, but it's essentially an append operation because
             // the records are sorted)
-            let record = &sorted_records[index];
-            let insert_result = self.append(record);
-            if let Err(err) = insert_result {
-                return Err(err);
-            }
+            let _ = self.append(record)?;
         }
 
         // For midpoint to data row length
@@ -283,10 +279,7 @@ impl<'a> LeafNodeView<'a> {
             // the records are sorted)
             let record = &sorted_records[index];
             // Append the raw record to the new right sibling leaf
-            let insert_result = right_sibling.append(record);
-            if let Err(err) = insert_result {
-                return Err(err);
-            }
+            let _ = right_sibling.append(record)?;
         }
 
         // Adjust the sibling pointers

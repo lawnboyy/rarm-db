@@ -58,7 +58,7 @@ impl DataValue {
                 // Use log(base 10) + 1 to determine the number of digits in the integer part.
                 let integer_digit_count = integer_part.checked_ilog10().unwrap_or(0) + 1;
 
-                return scale <= (s as u32) && integer_digit_count <= ((p - s) as u32);
+                scale <= (s as u32) && integer_digit_count <= ((p - s) as u32)
             }
             _ => false,
         }
