@@ -9,6 +9,7 @@ use crate::{
         PAGE_HEADER_NEXT_SIBLING_LEAF_PAGE_INDEX_OFFSET, PAGE_HEADER_PARENT_INDEX_OFFSET,
         PAGE_HEADER_PREV_SIBLING_LEAF_PAGE_INDEX_OFFSET,
     },
+    page_id::PAGE_SIZE,
     record_serializer, slot,
 };
 
@@ -92,24 +93,60 @@ impl<'a> LeafNodeView<'a> {
             let record_bytes = &record_serializer::serialize(&table_def.columns, record).unwrap();
 
             // The slotted page will return an error if there is insufficient space to insert this record.
-            return self
-                .page_view
-                .try_insert_record(insertion_slot as u16, record_bytes);
+            self.page_view
+                .try_insert_record(insertion_slot as u16, record_bytes)
+        } else {
+            // A record with this primary key already exists, so it's a duplicate key...
+            Err(StorageError::DuplicateKey)
         }
-
-        // A record with this primary key already exists, so it's a duplicate key...
-        Err(StorageError::DuplicateKey)
     }
 
     /// Appends the records of the right sibling to the end of this leaf node to reclaim a page of storage and keep
     /// the nodes data dense.
-    // pub fn merge(
-    //     &mut self,
-    //     right_sibling: &mut LeafNodeView<'_>,
-    //     right_sibling_next: Option<&mut LeafNodeView<'_>>,
-    //     table_def: &TableDefinition,
-    // ) -> Result<(), StorageError> {
-    // }
+    pub fn merge(
+        &mut self,
+        right_sibling: &mut LeafNodeView<'_>,
+        right_sibling_next: Option<&mut LeafNodeView<'_>>,
+    ) -> Result<(), StorageError> {
+        // First, ensure that there is enough space available for all the right siblings records.
+        // Calculate the total bytes used by the right sibling which is: page size - free space - header
+        let right_sibling_total_used = PAGE_SIZE - right_sibling.page_view.get_free_space() - 32;
+        // TODO: This returns if there is insufficient contiguous space in the free block. We could also
+        // check total free space and do a complete repopulate with all this leaf's records plus the right
+        // siblings records to compact fragmented space during the merge.
+        if right_sibling_total_used > self.page_view.get_free_space_contiguous() {
+            return Err(StorageError::InsufficientSpaceForMerge);
+        }
+
+        // Loop through the right sibling leaf and append each record to this leaf.
+        let right_sibling_item_count = right_sibling.get_item_count();
+        for index in 0..right_sibling_item_count {
+            let record_data_option = right_sibling.page_view.get_record(index);
+            if let Some(record_data) = record_data_option {
+                if self.append(record_data).is_err() {
+                    // TODO: What should happen if the record insert/append fails? Some of the records may
+                    // have already been written, but the right sibling may be corrupt.
+                    return Err(StorageError::InsertRecordFailed);
+                }
+            } else {
+                return Err(StorageError::InvalidSlotIndex);
+            }
+        }
+
+        // Adjust the sibling pointers.
+        self.set_next_leaf_index(right_sibling.get_next_leaf_index());
+        // If there is a right sibling next, adjust its previous pointer...
+        if let Some(right_leaf) = right_sibling_next {
+            right_leaf.set_prev_leaf_index(Some(self.page_id.page_index));
+        }
+
+        // Reformat the right sibling
+        right_sibling
+            .page_view
+            .initialize(crate::PageType::Invalid, None);
+
+        Ok(())
+    }
 
     pub fn set_next_leaf_index(&mut self, page_index: Option<u32>) {
         let index = if let Some(i) = page_index {

@@ -1,8 +1,10 @@
 use crate::{
     PageType,
     page::{
-        PAGE_HEADER_DATA_HEAP_END_OFFSET_OFFSET, PAGE_HEADER_ITEM_COUNT_OFFSET,
-        PAGE_HEADER_PAGE_TYPE_OFFSET, PAGE_HEADER_PARENT_INDEX_OFFSET, PAGE_HEADER_SIZE,
+        INVALID_PAGE_INDEX, PAGE_HEADER_DATA_HEAP_END_OFFSET_OFFSET, PAGE_HEADER_ITEM_COUNT_OFFSET,
+        PAGE_HEADER_NEXT_SIBLING_LEAF_PAGE_INDEX_OFFSET, PAGE_HEADER_PAGE_TYPE_OFFSET,
+        PAGE_HEADER_PARENT_INDEX_OFFSET, PAGE_HEADER_PREV_SIBLING_LEAF_PAGE_INDEX_OFFSET,
+        PAGE_HEADER_RIGHTMOST_CHILD_POINTER_OFFSET, PAGE_HEADER_SIZE,
     },
     page_id::PAGE_SIZE,
     slot::SLOT_SIZE,
@@ -43,7 +45,21 @@ impl<'a> SlottedPageView<'a> {
         } else {
             u64::MAX
         };
+
+        // Set all pointers to invalid...
         self.set_page_header_u64_value(PAGE_HEADER_PARENT_INDEX_OFFSET, parent_index);
+        self.set_page_header_u32_value(
+            PAGE_HEADER_RIGHTMOST_CHILD_POINTER_OFFSET,
+            INVALID_PAGE_INDEX,
+        );
+        self.set_page_header_u32_value(
+            PAGE_HEADER_NEXT_SIBLING_LEAF_PAGE_INDEX_OFFSET,
+            INVALID_PAGE_INDEX,
+        );
+        self.set_page_header_u32_value(
+            PAGE_HEADER_PREV_SIBLING_LEAF_PAGE_INDEX_OFFSET,
+            INVALID_PAGE_INDEX,
+        );
 
         // Data heap grows backwards, so the data heap starting offset is the end of the page.
         self.buffer
@@ -197,6 +213,8 @@ impl<'a> SlottedPageView<'a> {
         PageType::from(self.buffer[PAGE_HEADER_PAGE_TYPE_OFFSET])
     }
 
+    /// Retrieve raw record by slot index.
+    /// TODO: Consider returning an error here if there is no record at the given index.
     pub fn get_record(&self, index: u16) -> Option<&[u8]> {
         // Check the item count against the requested index...
         let item_count = self.get_item_count();
