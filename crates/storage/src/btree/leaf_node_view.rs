@@ -109,6 +109,11 @@ impl<'a> LeafNodeView<'a> {
             .set_page_header_u32_value(PAGE_HEADER_PREV_SIBLING_LEAF_PAGE_INDEX_OFFSET, index);
     }
 
+    /// Finds the ordered position for the new record, calculates a split index based on
+    /// actual data size in bytes, formats this page and writes half the sorted data to
+    /// this page and half to the new right sibling node. If the b-tree orchestrator
+    /// attempts an insert and it fails because the page is full, then it can allocate
+    /// a new page and call this method to distribute the data across 2 nodes.
     pub fn split_and_insert(
         &mut self,
         record: &Record,

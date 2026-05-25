@@ -568,4 +568,115 @@ mod tests {
             "The returned separator key must match the first key of the newly split right sibling"
         );
     }
+
+    #[test]
+    fn test_leaf_node_split_and_insert_no_right_sibling() {
+        // 1. Setup Schema
+        let mut schema = TableDefinition::new("users".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new(
+                "name".to_string(),
+                PrimitiveDataType::Varchar(50),
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+        schema.add_constraint(
+            Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
+        );
+
+        // 2. Setup Sibling Page Buffers & IDs
+        let left_id = PageId {
+            table_id: 1,
+            page_index: 10,
+        };
+        let right_id = PageId {
+            table_id: 1,
+            page_index: 11,
+        };
+
+        let mut left_buffer = [0u8; PAGE_SIZE];
+        let mut right_buffer = [0u8; PAGE_SIZE];
+
+        let mut left_pv = SlottedPageView::new(&mut left_buffer);
+        left_pv.initialize(PageType::LeafNode, None);
+        let mut left_view = LeafNodeView::new(left_id, left_pv);
+
+        let mut right_pv = SlottedPageView::new(&mut right_buffer);
+        right_pv.initialize(PageType::LeafNode, None);
+        let mut right_view = LeafNodeView::new(right_id, right_pv);
+
+        // 3. Establish initial pointer links (No initial right sibling)
+        left_view.set_next_leaf_index(None);
+
+        // 4. Populate with initial data
+        left_view
+            .insert_record(
+                &Record::from(vec![
+                    DataValue::Int(10),
+                    DataValue::Text("Alice".to_string()),
+                ]),
+                &schema,
+            )
+            .unwrap();
+        left_view
+            .insert_record(
+                &Record::from(vec![DataValue::Int(20), DataValue::Text("Bob".to_string())]),
+                &schema,
+            )
+            .unwrap();
+        left_view
+            .insert_record(
+                &Record::from(vec![
+                    DataValue::Int(30),
+                    DataValue::Text("Charlie".to_string()),
+                ]),
+                &schema,
+            )
+            .unwrap();
+        left_view
+            .insert_record(
+                &Record::from(vec![
+                    DataValue::Int(40),
+                    DataValue::Text("David".to_string()),
+                ]),
+                &schema,
+            )
+            .unwrap();
+
+        // New record that caused the split
+        let rec25 = Record::from(vec![
+            DataValue::Int(25),
+            DataValue::Text("Grace".to_string()),
+        ]);
+
+        // 5. Act: Execute split and insert (Expected to return the separator Key!)
+        let separator_key = left_view
+            .split_and_insert(&rec25, &mut right_view, None, &schema)
+            .expect("Split and insert should succeed");
+
+        // 6. Assert Sibling Pointer Link Updates (Expected: Left <-> Right -> None)
+        assert_eq!(left_view.get_next_leaf_index(), Some(right_id.page_index));
+        assert_eq!(left_view.get_prev_leaf_index(), None);
+
+        assert_eq!(right_view.get_prev_leaf_index(), Some(left_id.page_index));
+        assert_eq!(right_view.get_next_leaf_index(), None);
+
+        // 7. Assert Separator Key Integrity
+        let mut right_keys = Vec::new();
+        for i in 0..right_view.page_view.get_item_count() {
+            let record_bytes = right_view.page_view.get_record(i).unwrap();
+            let key = record_serializer::deserialize_primary_key(&schema, record_bytes).unwrap();
+            right_keys.push(key);
+        }
+
+        assert_eq!(
+            right_keys[0], separator_key,
+            "The returned separator key must match the first key of the newly split right sibling"
+        );
+    }
 }

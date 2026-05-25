@@ -34,6 +34,9 @@ impl<'a> SlottedPageView<'a> {
         // Set the byte at the page type offset...
         self.buffer[PAGE_HEADER_PAGE_TYPE_OFFSET] = page_type as u8;
 
+        // Reset the item count...
+        self.set_page_header_u16_value(PAGE_HEADER_ITEM_COUNT_OFFSET, 0);
+
         // Set the parent
         let parent_index = if let Some(index) = parent_page_index {
             index
