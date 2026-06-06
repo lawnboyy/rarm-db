@@ -274,11 +274,9 @@ impl<'a> LeafNodeView<'a> {
 
         // For midpoint to data row length
         let final_count: usize = item_count as usize + 1;
-        for index in split_index..final_count {
+        for record in sorted_records[split_index..final_count].iter() {
             // Append the raw record to the page (we can just call insert here, but it's essentially an append operation because
             // the records are sorted)
-            let record = &sorted_records[index];
-            // Append the raw record to the new right sibling leaf
             let _ = right_sibling.append(record)?;
         }
 
