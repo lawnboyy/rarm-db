@@ -37,7 +37,7 @@ impl BufferPoolManager {
         BufferPoolManager {
             disk_manager,
             evictor: Box::new(ClockEvictor::new(size)),
-            frames: (0..size).map(|i| Frame::new(i)).collect(),
+            frames: (0..size).map(Frame::new).collect(),
             free_frames: Mutex::new(initial_frames),
             page_io_processing: Mutex::new(PageProcessingMap::new()),
             page_table: Mutex::new(HashMap::new()),
@@ -53,46 +53,50 @@ impl BufferPoolManager {
             // TODO: Consider doing some better error handling here instead of returning a string.
             .map_err(|e| BufferPoolError::PageAllocation(e.to_string()))?;
 
-        // Lock the page table so we can find a frame, pin it, and insert the entry into the page table.
-        let mut page_table_guard = self.page_table.lock().unwrap();
-
         // Placeholder for dirty page data if we need to flush an evicted page...
         let mut page_data: Option<(PageId, [u8; PAGE_SIZE])> = None;
 
-        // Check for a free frame. If no free frame is available, evict a frame.
-        // Acquire the lock on the free frames to see if any are available.
-        let frame_id = if let Some(id) = self.free_frames.lock().unwrap().pop() {
-            self.pin_frame(id);
-            id
-        } else {
-            // There are no free frames available so we must evict a page.
-            let mut page_processing_guard = self.page_io_processing.lock().unwrap();
-            let evicted_page_data = self.evict_page(&mut page_table_guard).unwrap();
-            let free_frame_id = evicted_page_data.0;
-            self.pin_frame(free_frame_id);
-            page_data = evicted_page_data.1;
+        let free_frame;
 
-            // If the evicted page was dirty, we need to flush it to disk before we release the page_table lock,
-            // and we need to add a processing channel to notify other threads that this page is getting flushed.
-            if self.frames[free_frame_id].is_dirty() {
-                // Get the ID of the page that is going to be flushed...
-                let id_of_page_to_flush = page_data.unwrap().0;
-                // Create a channel to notify other threads that this page is processing...
-                let (tx, _rx) = broadcast::channel::<Result<(), String>>(1);
-                page_processing_guard.flushes.insert(id_of_page_to_flush, tx.clone());
-            }
+        { // Use inner block to restrict the page table guard's scope, so that Clippy won't think we are holding the mutex
+          // across an await boundary.
 
-            free_frame_id
-        };
+            // Lock the page table so we can find a frame, pin it, and insert the entry into the page table.
+            let mut page_table_guard = self.page_table.lock().unwrap();
 
-        // Set the page ID...
-        let free_frame = &self.frames[frame_id];
-        free_frame.set_page_id(Some(page_id));
+            // Check for a free frame. If no free frame is available, evict a frame.
+            // Acquire the lock on the free frames to see if any are available.
+            let frame_id = if let Some(id) = self.free_frames.lock().unwrap().pop() {
+                self.pin_frame(id);
+                id
+            } else {
+                // There are no free frames available so we must evict a page.
+                let mut page_processing_guard = self.page_io_processing.lock().unwrap();
+                let evicted_page_data = self.evict_page(&mut page_table_guard).unwrap();
+                let free_frame_id = evicted_page_data.0;
+                self.pin_frame(free_frame_id);
+                page_data = evicted_page_data.1;
 
-        // Add the page ID to the page table.
-        page_table_guard.insert(page_id, frame_id);
+                // If the evicted page was dirty, we need to flush it to disk before we release the page_table lock,
+                // and we need to add a processing channel to notify other threads that this page is getting flushed.
+                if self.frames[free_frame_id].is_dirty() {
+                    // Get the ID of the page that is going to be flushed...
+                    let id_of_page_to_flush = page_data.unwrap().0;
+                    // Create a channel to notify other threads that this page is processing...
+                    let (tx, _rx) = broadcast::channel::<Result<(), String>>(1);
+                    page_processing_guard.flushes.insert(id_of_page_to_flush, tx.clone());
+                }
 
-        drop(page_table_guard);
+                free_frame_id
+            };
+
+            // Set the page ID...
+            free_frame = &self.frames[frame_id];
+            free_frame.set_page_id(Some(page_id));
+
+            // Add the page ID to the page table.
+            page_table_guard.insert(page_id, frame_id);
+        } // drop(page_table_guard);
 
         // Now that we have dropped the locks we can flush the dirty page data to disk if necessary...
         if let Some((page_to_flush_id, page_data)) = page_data {
@@ -135,7 +139,7 @@ impl BufferPoolManager {
             let read_lock = frame.read_data();
             Ok(PageReadGuard::new(self.evictor.as_ref(), frame, read_lock))
         } else {
-            return Err(BufferPoolError::BufferFull);
+            Err(BufferPoolError::BufferFull)
         }
     }
 
@@ -154,7 +158,7 @@ impl BufferPoolManager {
                 write_lock,
             ))
         } else {
-            return Err(BufferPoolError::BufferFull);
+            Err(BufferPoolError::BufferFull)
         }
     }
 
@@ -214,13 +218,13 @@ impl BufferPoolManager {
 
         // If no frame ID is found in the free frames and no frame could be evicted, the buffer is full and no
         // the page cannot be fetched.
-        if let None = available_frame_id {
+        if available_frame_id.is_none() {
             return Err(BufferPoolError::BufferFull);
         }       
 
         let frame_id = available_frame_id.unwrap();
 
-        // While the locks are held, insert the new entry into the page table...
+        // While the locks are held, insert the new entry into the page table...        
         page_table_guard.insert(page_id, frame_id);
         
         // Reset this frame...
@@ -239,7 +243,6 @@ impl BufferPoolManager {
         // Mutexes cannot be held across async/await boundaries. Drop the locks so we can load from disk asynchronously.
         drop(io_processing_guard);
         drop(page_table_guard);
-
 
         // With the page entry added to the page table and the page pinned to prevent eviction, if this page is being
         // flushed, wait for that to complete before reading from disk.
