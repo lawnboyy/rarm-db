@@ -166,30 +166,35 @@ impl BufferPoolManager {
     /// page is read from disk and loaded into the free frame. If no free frames are available, the
     /// evictor is called to evict a page from the cache to free up a frame.
     async fn fetch_and_pin_frame(&self, page_id: PageId) -> Result<&Frame, BufferPoolError> {
-        // Lock the page table to prepare read from the cache and pin or to insert a new entry...
-        let mut page_table_guard = self.page_table.lock().unwrap();
+        // First check to see if the page is cached...
+        // Scope this block so that the page table guard's lifetime is guaranteed to end before we make the potential
+        // await call to wait for a page fetch.
+        let cached_frame_id = {
+            let page_table_guard = self.page_table.lock().unwrap();
+            if let Some(&frame_id) = page_table_guard.get(&page_id) {
+                self.pin_frame(frame_id);
+                // Pass back the cached page's frame ID
+                Some(frame_id) 
+            } else {
+                None
+            }
+        }; // page_table_guard is implicitly dropped here! The compiler knows it's dead.
 
-        // Check the cache...
-        if let Some(&frame_id) = page_table_guard.get(&page_id) {
-            // Pin the frame while the page table lock is held to prevent an eviction...
-            self.pin_frame(frame_id);
-            // With the frame pinned, the page table lock can be dropped
-            drop(page_table_guard);
-
-            // Wait for any IO processing involving this page until proceeding.
-            // Check if the page is being fetched by checking the processing map. It should not be possible for the page
-            // to be flushing here since it was found in the page table and, hence, has not been evicted.
-            let result = self.wait_for_page_fetch(page_id).await;
-            // If there was an error waiting on the broadcast channel, unpin the frame and return the error.
-            if let Err(e) = result {
+        // If we got a cache hit, we pinned the frame so it's guaranteed to still be in the cache. So await for an
+        // existing page fetch operation, and then return the cached frame.
+        if let Some(frame_id) = cached_frame_id {
+            // Wait for any concurrent IO processing involving this page before proceeding
+            if let Err(e) = self.wait_for_page_fetch(page_id).await {
+                // If there was an error waiting on the broadcast channel, unpin the frame and return the error
                 self.unpin_frame(frame_id);
                 return Err(e);
             }
 
-            // Return the page frame...
+            // Return the pinned page frame safely
             return Ok(&self.frames[frame_id]);
         }
 
+        let mut page_table_guard = self.page_table.lock().unwrap();
         let mut page_data_to_flush: Option<(PageId, [u8; 8192])> = None;
         let available_frame_id = {
             if let Some(free_frame_id) = self.free_frames.lock().unwrap().pop() {
