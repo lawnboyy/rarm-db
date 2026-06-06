@@ -677,7 +677,7 @@ mod tests {
             DataValue::Int(42),
             DataValue::BigInt(1234567890),
             DataValue::Boolean(true),
-            DataValue::Float(OrderedFloat(3.14159)),
+            DataValue::Float(OrderedFloat(std::f64::consts::PI)),
             DataValue::Decimal(decimal_val),
             DataValue::DateTime(datetime_ticks), // Assuming DateTime stores an i64 internally
             DataValue::Text("Alice".to_string()),
@@ -694,7 +694,7 @@ mod tests {
         expected_bytes.extend_from_slice(&42i32.to_le_bytes()); // Int (4 bytes)
         expected_bytes.extend_from_slice(&1234567890i64.to_le_bytes()); // BigInt (8 bytes)
         expected_bytes.extend_from_slice(&[1u8]); // Boolean (1 byte)
-        expected_bytes.extend_from_slice(&3.14159f64.to_le_bytes()); // Float (8 bytes)
+        expected_bytes.extend_from_slice(&std::f64::consts::PI.to_le_bytes()); // Float (8 bytes)
         expected_bytes.extend_from_slice(&decimal_val.serialize()); // Decimal (16 bytes)
         expected_bytes.extend_from_slice(&datetime_ticks.to_le_bytes()); // DateTime (8 bytes)
 
