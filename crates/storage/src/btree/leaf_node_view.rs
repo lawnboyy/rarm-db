@@ -7,7 +7,7 @@ use crate::{
     page::{
         INVALID_PAGE_INDEX, PAGE_HEADER_ITEM_COUNT_OFFSET,
         PAGE_HEADER_NEXT_SIBLING_LEAF_PAGE_INDEX_OFFSET, PAGE_HEADER_PARENT_INDEX_OFFSET,
-        PAGE_HEADER_PREV_SIBLING_LEAF_PAGE_INDEX_OFFSET,
+        PAGE_HEADER_PREV_SIBLING_LEAF_PAGE_INDEX_OFFSET, PAGE_HEADER_SIZE,
     },
     page_id::PAGE_SIZE,
     record_serializer,
@@ -110,7 +110,8 @@ impl<'a> LeafNodeView<'a> {
     ) -> Result<(), StorageError> {
         // First, ensure that there is enough space available for all the right siblings records.
         // Calculate the total bytes used by the right sibling which is: page size - free space - header
-        let right_sibling_total_used = PAGE_SIZE - right_sibling.page_view.get_free_space() - 32;
+        let right_sibling_total_used =
+            PAGE_SIZE - right_sibling.page_view.get_free_space() - PAGE_HEADER_SIZE;
         // TODO: This returns if there is insufficient contiguous space in the free block. We could also
         // check total free space and do a complete repopulate with all this leaf's records plus the right
         // siblings records to compact fragmented space during the merge.

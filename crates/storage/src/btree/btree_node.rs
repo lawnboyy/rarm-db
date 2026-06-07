@@ -879,4 +879,224 @@ mod tests {
         );
         assert_eq!(left_view.get_prev_leaf_index(), None);
     }
+
+    #[test]
+    fn test_leaf_node_merge_basic_coalesce() {
+        // 1. Setup Table Schema
+        let mut schema = TableDefinition::new("customers".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_constraint(
+            Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
+        );
+
+        // 2. Allocate 2 Sibling Leaf Pages (Left index 10, Right index 11)
+        let left_id = PageId {
+            table_id: 1,
+            page_index: 10,
+        };
+        let right_id = PageId {
+            table_id: 1,
+            page_index: 11,
+        };
+
+        let mut left_buffer = [0u8; PAGE_SIZE];
+        let mut right_buffer = [0u8; PAGE_SIZE];
+
+        let mut left_pv = SlottedPageView::new(&mut left_buffer);
+        left_pv.initialize(PageType::LeafNode, None);
+        let mut left_view = LeafNodeView::new(left_id, left_pv);
+
+        let mut right_pv = SlottedPageView::new(&mut right_buffer);
+        right_pv.initialize(PageType::LeafNode, None);
+        let mut right_view = LeafNodeView::new(right_id, right_pv);
+
+        // 3. Establish initial pointer links (Left points to Right, Right points back to Left)
+        left_view.set_next_leaf_index(Some(right_id.page_index));
+        right_view.set_prev_leaf_index(Some(left_id.page_index));
+        right_view.set_next_leaf_index(None); // Rightmost boundary
+
+        // 4. Populate with initial record data
+        // Left leaf gets Keys: 10, 20
+        left_view
+            .insert_record(&Record::from(vec![DataValue::Int(10)]), &schema)
+            .unwrap();
+        left_view
+            .insert_record(&Record::from(vec![DataValue::Int(20)]), &schema)
+            .unwrap();
+
+        // Right leaf gets Keys: 30, 40 (Simulating an underflow state due to deletions)
+        right_view
+            .insert_record(&Record::from(vec![DataValue::Int(30)]), &schema)
+            .unwrap();
+        right_view
+            .insert_record(&Record::from(vec![DataValue::Int(40)]), &schema)
+            .unwrap();
+
+        // 5. Act: Execute the merge. We pass None because there is no sibling past the right node.
+        left_view
+            .merge(&mut right_view, None)
+            .expect("Basic leaf node merge should succeed");
+
+        // 6. Assert Data Integrity: Left view must now contain all 4 records in perfect order
+        assert_eq!(
+            4,
+            left_view.page_view.get_item_count(),
+            "Left node should contain the combined item count"
+        );
+
+        let mut resulting_keys = Vec::new();
+        for i in 0..left_view.page_view.get_item_count() {
+            let record_bytes = left_view.page_view.get_record(i).unwrap();
+            let key = record_serializer::deserialize_primary_key(&schema, record_bytes).unwrap();
+            resulting_keys.push(key);
+        }
+
+        let expected_keys = vec![
+            Key::from(DataValue::Int(10)),
+            Key::from(DataValue::Int(20)),
+            Key::from(DataValue::Int(30)),
+            Key::from(DataValue::Int(40)),
+        ];
+        assert_eq!(
+            expected_keys, resulting_keys,
+            "Records from right sibling were not correctly appended in order"
+        );
+
+        // 7. Assert Sibling Pointer Realignment
+        assert_eq!(
+            left_view.get_next_leaf_index(),
+            None,
+            "Left next pointer should skip over right node and be None"
+        );
+        assert_eq!(
+            left_view.get_prev_leaf_index(),
+            None,
+            "Left prev pointer should remain unchanged"
+        );
+
+        // 8. Assert Reclaimed Page Cleanness: The right view must be completely cleared out
+        assert_eq!(
+            0,
+            right_view.page_view.get_item_count(),
+            "The right page should contain zero entries post-merge"
+        );
+        assert_eq!(
+            None,
+            right_view.get_next_leaf_index(),
+            "Right page next index pointer should be reset"
+        );
+        assert_eq!(
+            None,
+            right_view.get_prev_leaf_index(),
+            "Right page prev index pointer should be reset"
+        );
+    }
+
+    #[test]
+    fn test_leaf_node_merge_with_trailing_right_sibling() {
+        let mut schema = TableDefinition::new("customers".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_constraint(
+            Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
+        );
+
+        let left_id = PageId {
+            table_id: 1,
+            page_index: 10,
+        };
+        let mid_id = PageId {
+            table_id: 1,
+            page_index: 11,
+        };
+        let trailing_id = PageId {
+            table_id: 1,
+            page_index: 12,
+        };
+
+        let mut left_buffer = [0u8; PAGE_SIZE];
+        let mut mid_buffer = [0u8; PAGE_SIZE];
+        let mut trailing_buffer = [0u8; PAGE_SIZE];
+
+        let mut left_pv = SlottedPageView::new(&mut left_buffer);
+        left_pv.initialize(PageType::LeafNode, None);
+        let mut left_view = LeafNodeView::new(left_id, left_pv);
+
+        let mut mid_pv = SlottedPageView::new(&mut mid_buffer);
+        mid_pv.initialize(PageType::LeafNode, None);
+        let mut mid_view = LeafNodeView::new(mid_id, mid_pv);
+
+        let mut trailing_pv = SlottedPageView::new(&mut trailing_buffer);
+        trailing_pv.initialize(PageType::LeafNode, None);
+        let mut trailing_view = LeafNodeView::new(trailing_id, trailing_pv);
+
+        left_view.set_next_leaf_index(Some(mid_id.page_index));
+
+        mid_view.set_prev_leaf_index(Some(left_id.page_index));
+        mid_view.set_next_leaf_index(Some(trailing_id.page_index));
+
+        trailing_view.set_prev_leaf_index(Some(mid_id.page_index));
+        trailing_view.set_next_leaf_index(None);
+
+        left_view
+            .insert_record(&Record::from(vec![DataValue::Int(10)]), &schema)
+            .unwrap();
+        left_view
+            .insert_record(&Record::from(vec![DataValue::Int(20)]), &schema)
+            .unwrap();
+
+        mid_view
+            .insert_record(&Record::from(vec![DataValue::Int(30)]), &schema)
+            .unwrap();
+        mid_view
+            .insert_record(&Record::from(vec![DataValue::Int(40)]), &schema)
+            .unwrap();
+
+        trailing_view
+            .insert_record(&Record::from(vec![DataValue::Int(50)]), &schema)
+            .unwrap();
+        trailing_view
+            .insert_record(&Record::from(vec![DataValue::Int(60)]), &schema)
+            .unwrap();
+
+        // Act: Execute merge without the schema parameter
+        left_view
+            .merge(&mut mid_view, Some(&mut trailing_view))
+            .expect("Leaf node merge with trailing sibling should succeed");
+
+        assert_eq!(4, left_view.page_view.get_item_count());
+        let mut left_keys = Vec::new();
+        for i in 0..left_view.page_view.get_item_count() {
+            let record_bytes = left_view.page_view.get_record(i).unwrap();
+            let key = record_serializer::deserialize_primary_key(&schema, record_bytes).unwrap();
+            left_keys.push(key);
+        }
+        assert_eq!(
+            vec![
+                Key::from(DataValue::Int(10)),
+                Key::from(DataValue::Int(20)),
+                Key::from(DataValue::Int(30)),
+                Key::from(DataValue::Int(40))
+            ],
+            left_keys
+        );
+
+        assert_eq!(
+            left_view.get_next_leaf_index(),
+            Some(trailing_id.page_index)
+        );
+        assert_eq!(
+            trailing_view.get_prev_leaf_index(),
+            Some(left_id.page_index)
+        );
+
+        assert_eq!(0, mid_view.page_view.get_item_count());
+        assert_eq!(None, mid_view.get_next_leaf_index());
+        assert_eq!(None, mid_view.get_prev_leaf_index());
+
+        assert_eq!(2, trailing_view.page_view.get_item_count());
+    }
 }
