@@ -116,7 +116,7 @@ impl Constraint {
         }
 
         // Validate the column name collection; return an error if any invalid names found (empty strings or all whitespace)
-        Self::validate_columns(&column_names)?;
+        Self::validate_columns(column_names)?;
         Ok(())
     }
 

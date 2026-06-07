@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn test_sorting_vec() {
         // This test proves that Ord is implemented correctly for sorting algorithms
-        let mut list = vec![
+        let mut list = [
             OrderedFloat(1.0),
             OrderedFloat(f64::NAN),
             OrderedFloat(f64::NEG_INFINITY),

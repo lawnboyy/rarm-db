@@ -103,7 +103,7 @@ mod tests {
         assert!(!record.is_empty());
 
         // Test get() via Deref
-        assert_eq!(record.get(0), Some(&values[0]));
+        assert_eq!(record.first(), Some(&values[0]));
         assert_eq!(record.get(1), Some(&values[1]));
         assert_eq!(record.get(2), Some(&values[2]));
         assert_eq!(record.get(3), None);

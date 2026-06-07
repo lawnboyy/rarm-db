@@ -55,7 +55,7 @@ mod tests {
         let col = col.unwrap();
         assert_eq!(col.name, "id");
         assert_eq!(col.data_type, PrimitiveDataType::Int);
-        assert_eq!(col.is_nullable, false);
+        assert!(!col.is_nullable);
         assert_eq!(col.default_value, None);
     }
 
