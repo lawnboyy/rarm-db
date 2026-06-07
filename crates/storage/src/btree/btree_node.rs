@@ -1099,4 +1099,78 @@ mod tests {
 
         assert_eq!(2, trailing_view.page_view.get_item_count());
     }
+
+    #[test]
+    fn test_leaf_node_merge_exceeds_page_capacity() {
+        // 1. Setup Schema
+        let mut schema = TableDefinition::new("customers".to_string()).unwrap();
+        schema.add_column(
+            ColumnDefinition::new("id".to_string(), PrimitiveDataType::Int, false, None).unwrap(),
+        );
+        schema.add_column(
+            ColumnDefinition::new(
+                "large_payload".to_string(),
+                PrimitiveDataType::Varchar(8000),
+                false,
+                None,
+            )
+            .unwrap(),
+        );
+        schema.add_constraint(
+            Constraint::primary_key("pk".to_string(), vec!["id".to_string()]).unwrap(),
+        );
+
+        // 2. Setup Sibling Page Buffers & IDs
+        let left_id = PageId {
+            table_id: 1,
+            page_index: 10,
+        };
+        let right_id = PageId {
+            table_id: 1,
+            page_index: 11,
+        };
+
+        let mut left_buffer = [0u8; PAGE_SIZE];
+        let mut right_buffer = [0u8; PAGE_SIZE];
+
+        let mut left_pv = SlottedPageView::new(&mut left_buffer);
+        left_pv.initialize(PageType::LeafNode, None);
+        let mut left_view = LeafNodeView::new(left_id, left_pv);
+
+        let mut right_pv = SlottedPageView::new(&mut right_buffer);
+        right_pv.initialize(PageType::LeafNode, None);
+        let mut right_view = LeafNodeView::new(right_id, right_pv);
+
+        // Link them
+        left_view.set_next_leaf_index(Some(right_id.page_index));
+        right_view.set_prev_leaf_index(Some(left_id.page_index));
+
+        // 3. Populate with large records that individually fit, but combined exceed PAGE_SIZE
+        // Let's create a 5000-byte record for left
+        let payload_left = "A".repeat(5000);
+        let rec_left = Record::from(vec![DataValue::Int(10), DataValue::Text(payload_left)]);
+        left_view.insert_record(&rec_left, &schema).unwrap();
+
+        // Let's create a 4000-byte record for right
+        let payload_right = "B".repeat(4000);
+        let rec_right = Record::from(vec![DataValue::Int(20), DataValue::Text(payload_right)]);
+        right_view.insert_record(&rec_right, &schema).unwrap();
+
+        // 4. Act: Attempt to merge right into left (Combined size: ~9000 bytes > 8192)
+        let result = left_view.merge(&mut right_view, None);
+
+        // 5. Assert: Must return InsufficientSpaceForMerge error, leaving both pages completely unmodified
+        assert!(matches!(
+            result,
+            Err(StorageError::InsufficientSpaceForMerge)
+        ));
+
+        // Ensure data is still intact
+        assert_eq!(1, left_view.page_view.get_item_count());
+        assert_eq!(1, right_view.page_view.get_item_count());
+
+        // Ensure links are still intact
+        assert_eq!(left_view.get_next_leaf_index(), Some(right_id.page_index));
+        assert_eq!(right_view.get_prev_leaf_index(), Some(left_id.page_index));
+    }
 }
