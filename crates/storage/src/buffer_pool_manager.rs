@@ -165,36 +165,34 @@ impl BufferPoolManager {
     /// Attempts to find the page in the cache. Upon a cache miss, if a free frame is available, the
     /// page is read from disk and loaded into the free frame. If no free frames are available, the
     /// evictor is called to evict a page from the cache to free up a frame.
+    /// Notes: Ignores warnings about holding locks across await boundaries. These can be safely
+    /// ignored because we explicitly drop the locks before any await calls.
+    #[allow(clippy::await_holding_lock)]
     async fn fetch_and_pin_frame(&self, page_id: PageId) -> Result<&Frame, BufferPoolError> {
-        // First check to see if the page is cached...
-        // Scope this block so that the page table guard's lifetime is guaranteed to end before we make the potential
-        // await call to wait for a page fetch.
-        let cached_frame_id = {
-            let page_table_guard = self.page_table.lock().unwrap();
-            if let Some(&frame_id) = page_table_guard.get(&page_id) {
-                self.pin_frame(frame_id);
-                // Pass back the cached page's frame ID
-                Some(frame_id) 
-            } else {
-                None
-            }
-        }; // page_table_guard is implicitly dropped here! The compiler knows it's dead.
+        // Lock the page table to prepare read from the cache and pin or to insert a new entry...
+        let mut page_table_guard = self.page_table.lock().unwrap();
 
-        // If we got a cache hit, we pinned the frame so it's guaranteed to still be in the cache. So await for an
-        // existing page fetch operation, and then return the cached frame.
-        if let Some(frame_id) = cached_frame_id {
-            // Wait for any concurrent IO processing involving this page before proceeding
-            if let Err(e) = self.wait_for_page_fetch(page_id).await {
-                // If there was an error waiting on the broadcast channel, unpin the frame and return the error
+        // Check the cache...
+        if let Some(&frame_id) = page_table_guard.get(&page_id) {
+            // Pin the frame while the page table lock is held to prevent an eviction...
+            self.pin_frame(frame_id);
+            // With the frame pinned, the page table lock can be dropped
+            drop(page_table_guard);
+
+            // Wait for any IO processing involving this page until proceeding.
+            // Check if the page is being fetched by checking the processing map. It should not be possible for the page
+            // to be flushing here since it was found in the page table and, hence, has not been evicted.
+            let result = self.wait_for_page_fetch(page_id).await;
+            // If there was an error waiting on the broadcast channel, unpin the frame and return the error.
+            if let Err(e) = result {
                 self.unpin_frame(frame_id);
                 return Err(e);
             }
 
-            // Return the pinned page frame safely
+            // Return the page frame...
             return Ok(&self.frames[frame_id]);
         }
 
-        let mut page_table_guard = self.page_table.lock().unwrap();
         let mut page_data_to_flush: Option<(PageId, [u8; 8192])> = None;
         let available_frame_id = {
             if let Some(free_frame_id) = self.free_frames.lock().unwrap().pop() {
@@ -231,7 +229,7 @@ impl BufferPoolManager {
 
         // While the locks are held, insert the new entry into the page table...        
         page_table_guard.insert(page_id, frame_id);
-        
+
         // Reset this frame...
         // Set the page ID on the frame.
         self.frames[frame_id].set_page_id(Some(page_id));
@@ -248,6 +246,7 @@ impl BufferPoolManager {
         // Mutexes cannot be held across async/await boundaries. Drop the locks so we can load from disk asynchronously.
         drop(io_processing_guard);
         drop(page_table_guard);
+
 
         // With the page entry added to the page table and the page pinned to prevent eviction, if this page is being
         // flushed, wait for that to complete before reading from disk.
@@ -312,7 +311,6 @@ impl BufferPoolManager {
         }        
 
         Ok(&self.frames[frame_id])
-        
     }
 
     fn evict_page(
@@ -372,6 +370,7 @@ impl BufferPoolManager {
     }
 
     /// Checks for any in-flight fetches and waits.
+    #[allow(clippy::await_holding_lock)]
     async fn wait_for_page_fetch(&self, page_id: PageId) -> Result<(), BufferPoolError> {        
         let io_processing_guard = self.page_io_processing.lock().unwrap();
         let io_processing_result = io_processing_guard.fetches.get(&page_id);
@@ -396,6 +395,7 @@ impl BufferPoolManager {
     }
 
     /// Checks if this page is being flushed and waits for it to complete.
+    #[allow(clippy::await_holding_lock)]
     async fn wait_for_page_flush(&self, page_id: PageId) -> Result<(), BufferPoolError> {        
         let io_processing_guard = self.page_io_processing.lock().unwrap();
         let io_processing_result = io_processing_guard.flushes.get(&page_id);
